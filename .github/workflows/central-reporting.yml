@@ -39,7 +39,7 @@ jobs:
   call-inventory:
     name: Call mod-inventory-storage reporting
     needs: resolve-tags
-    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@main
+    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
     with:
       ref: refs/tags/${{ needs.resolve-tags.outputs.latest }}
       ref_name: ${{ needs.resolve-tags.outputs.latest }}
