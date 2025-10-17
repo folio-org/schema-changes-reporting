@@ -13,8 +13,8 @@ jobs:
     with:
       base: ${{ inputs.base }}
       head: ${{ inputs.head }}
-      repository: khandramai/a
-      artifact_name: report-a
+      repository: folio-org/mod-inventory-storage
+      artifact_name: report-mod-inventory-storage
     secrets: inherit
 
   collect-reports:
@@ -56,7 +56,7 @@ jobs:
           } > combined.html
 
           while IFS= read -r f; do
-            section_title="$(basename "$(dirname "$f")")"   # имя артефакта, напр. report-a
+            section_title="$(basename "$(dirname "$f")")"
             echo "<hr><h2>${section_title}</h2>" >> combined.html
 
             sed -n '/<body[^>]*>/,/<\/body>/p' "$f" | sed '1d;$d' >> combined.html
