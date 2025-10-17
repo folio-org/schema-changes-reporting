@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   mod-inventory-storage-report:
-    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@main
+    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
     with:
       base: ${{ inputs.base }}
       head: ${{ inputs.head }}
