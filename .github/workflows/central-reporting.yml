@@ -41,8 +41,8 @@ jobs:
     needs: resolve-tags
     uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
     with:
-      ref: refs/tags/${{ needs.resolve-tags.outputs.latest }}
-      ref_name: ${{ needs.resolve-tags.outputs.latest }}
+      # NOTE: 'ref' and 'ref_name' removed because they are not defined in the called workflow.
+      # Keep 'previous_tag' only if it exists in the module workflow definition.
       previous_tag: ${{ needs.resolve-tags.outputs.previous }}
     secrets:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
