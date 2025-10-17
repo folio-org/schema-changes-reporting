@@ -1,0 +1,72 @@
+name: Central Reporting
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  mod-inventory-storage-report:
+    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@main
+    with:
+      base: ${{ inputs.base }}
+      head: ${{ inputs.head }}
+      repository: khandramai/a
+      artifact_name: report-a
+    secrets: inherit
+
+  collect-reports:
+    needs: [ mod-inventory-storage-report ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all report artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          path: reports
+          merge-multiple: false
+          if-no-artifact-found: error
+
+      - name: Combine HTML reports with shared head/styles
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FIRST_HTML="$(find reports -type f -name 'report.html' | sort | head -n1)"
+          if [[ -z "${FIRST_HTML}" ]]; then
+            echo "No report.html files found" >&2
+            exit 1
+          fi
+
+          HEAD_CONTENT="$(sed -n '/<head[^>]*>/,/<\/head>/p' "${FIRST_HTML}" | sed '1d;$d')"
+
+          {
+            echo '<!DOCTYPE html>'
+            echo '<html lang="en">'
+            echo '<head>'
+            echo '<meta charset="UTF-8" />'
+            echo '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+            echo '<title>Combined Schema Changes Report</title>'
+            echo "${HEAD_CONTENT}"
+            echo '</head>'
+            echo '<body>'
+            echo '<h1>Combined Schema Changes Report</h1>'
+          } > combined.html
+
+          while IFS= read -r f; do
+            section_title="$(basename "$(dirname "$f")")"   # имя артефакта, напр. report-a
+            echo "<hr><h2>${section_title}</h2>" >> combined.html
+
+            sed -n '/<body[^>]*>/,/<\/body>/p' "$f" | sed '1d;$d' >> combined.html
+            echo >> combined.html
+          done < <(find reports -type f -name 'report.html' | sort)
+
+          echo '</body></html>' >> combined.html
+
+      - name: Upload combined report
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-report
+          path: combined.html
