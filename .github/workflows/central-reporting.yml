@@ -8,27 +8,28 @@ permissions:
   pull-requests: write
 
 jobs:
-  call-remote-a:
+  call-mod-inventory-storage:
     uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
     with:
       base: ${{ inputs.base }}
       head: ${{ inputs.head }}
       repository: folio-org/mod-inventory-storage
-      artifact_name: report-a
+      artifact_name: report-mod-inventory-storage
     secrets: inherit
 
-  call-remote-b:
-    needs: call-remote-a
-    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
-    with:
-      base: ${{ inputs.base }}
-      head: ${{ inputs.head }}
-      repository: folio-org/mod-inventory-storage
-      artifact_name: report-b
-    secrets: inherit
+#  call-remote-b:
+#    needs: call-mod-inventory-storage
+#    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
+#    with:
+#      base: ${{ inputs.base }}
+#      head: ${{ inputs.head }}
+#      repository: folio-org/mod-inventory-storage
+#      artifact_name: report-b
+#    secrets: inherit
 
   collect-reports:
-    needs: [ call-remote-a, call-remote-b ]
+    needs: [ call-mod-inventory-storage ]
+#    needs: [ call-mod-inventory-storage, call-remote-b ]
     runs-on: ubuntu-latest
     steps:
       - name: Download all report artifacts
@@ -63,20 +64,20 @@ jobs:
             echo '</head>'
             echo '<body>'
             echo '<h1>Combined Schema Changes Report</h1>'
-          } > combined.html
+          } > combined_report.html
 
           while IFS= read -r f; do
             section_title="$(basename "$(dirname "$f")")"
-            echo "<hr><h2>${section_title}</h2>" >> combined.html
+            echo "<hr><h2>${section_title}</h2>" >> combined_report.html
 
-            sed -n '/<body[^>]*>/,/<\/body>/p' "$f" | sed '1d;$d' >> combined.html
-            echo >> combined.html
+            sed -n '/<body[^>]*>/,/<\/body>/p' "$f" | sed '1d;$d' >> combined_report.html
+            echo >> combined_report.html
           done < <(find reports -type f -name 'report.html' | sort)
 
-          echo '</body></html>' >> combined.html
+          echo '</body></html>' >> combined_report.html
 
       - name: Upload combined report
         uses: actions/upload-artifact@v4
         with:
           name: combined-report
-          path: combined.html
+          path: combined_report.html
