@@ -17,19 +17,18 @@ jobs:
       artifact_name: report-mod-inventory-storage
     secrets: inherit
 
-#  call-remote-b:
-#    needs: call-mod-inventory-storage
-#    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
-#    with:
-#      base: ${{ inputs.base }}
-#      head: ${{ inputs.head }}
-#      repository: folio-org/mod-inventory-storage
-#      artifact_name: report-b
-#    secrets: inherit
+  call-mod-users:
+    needs: call-mod-inventory-storage
+    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@master
+    with:
+      base: ${{ inputs.base }}
+      head: ${{ inputs.head }}
+      repository: folio-org/mod-users
+      artifact_name: report-mod-users
+    secrets: inherit
 
   collect-reports:
-    needs: [ call-mod-inventory-storage ]
-#    needs: [ call-mod-inventory-storage, call-remote-b ]
+    needs: [ call-mod-inventory-storage, call-mod-users]
     runs-on: ubuntu-latest
     steps:
       - name: Download all report artifacts
