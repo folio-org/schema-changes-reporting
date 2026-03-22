@@ -1,34 +1,272 @@
-name: Run Remote Reporting
+name: Run Schema Changes Reporting
 
 on:
   workflow_dispatch:
+    inputs:
+      base:
+        description: "Optional BASE release tag (e.g. R1-2025-csp-4)"
+        required: false
+      head:
+        description: "Optional HEAD release tag (e.g. R1-2025-csp-5)"
+        required: false
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  call-mod-inventory-storage:
-    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@master
+  resolve_tags:
+    runs-on: ubuntu-latest
+    outputs:
+      release_head: ${{ steps.resolve.outputs.release_head }}
+      release_base: ${{ steps.resolve.outputs.release_base }}
+      mod_inventory_storage_base: ${{ steps.resolve.outputs.mod_inventory_storage_base }}
+      mod_inventory_storage_head: ${{ steps.resolve.outputs.mod_inventory_storage_head }}
+      mod_inventory_storage_base_app: ${{ steps.resolve.outputs.mod_inventory_storage_base_app }}
+      mod_inventory_storage_head_app: ${{ steps.resolve.outputs.mod_inventory_storage_head_app }}
+      mod_users_base: ${{ steps.resolve.outputs.mod_users_base }}
+      mod_users_head: ${{ steps.resolve.outputs.mod_users_head }}
+      mod_users_base_app: ${{ steps.resolve.outputs.mod_users_base_app }}
+      mod_users_head_app: ${{ steps.resolve.outputs.mod_users_head_app }}
+    steps:
+      - name: Resolve module tags from platform-lsp releases
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          # ── Configuration ──────────────────────────────────────────
+          TARGET_MODULES=("mod-inventory-storage" "mod-users")
+
+          # ── Step 1: Determine latest two release tags ──────────────
+          echo "::group::Clone platform-lsp"
+          git clone --quiet https://github.com/folio-org/platform-lsp.git /tmp/platform-lsp
+          echo "::endgroup::"
+
+          # ── Determine latest two release tags by creation date ─────
+          TAGS_WITH_DATES=$(git -C /tmp/platform-lsp for-each-ref \
+            --sort=-creatordate \
+            --format='%(refname:short) %(creatordate:format:%Y-%m-%d)' \
+            refs/tags/)
+
+          echo "Tags by creation date (newest first):"
+          echo "$TAGS_WITH_DATES" | head -10 | while IFS=' ' read -r TAG DATE; do
+            echo "  ${TAG} (${DATE})"
+          done
+
+          # ── Determine HEAD and BASE releases ───────────────────────
+          INPUT_HEAD="${{ inputs.head || '' }}"
+          INPUT_BASE="${{ inputs.base || '' }}"
+
+          if [[ -n "$INPUT_HEAD" && -z "$INPUT_BASE" ]] \
+            || [[ -z "$INPUT_HEAD" && -n "$INPUT_BASE" ]]; then
+            echo "::error::Specify both base and head, or leave both empty for auto-detection"
+            exit 1
+          fi
+
+          if [[ -n "$INPUT_HEAD" && -n "$INPUT_BASE" ]]; then
+            HEAD_RELEASE="$INPUT_HEAD"
+            BASE_RELEASE="$INPUT_BASE"
+            for TAG in "$HEAD_RELEASE" "$BASE_RELEASE"; do
+              if ! echo "$TAGS_WITH_DATES" | awk '{print $1}' | grep -qx "$TAG"; then
+                echo "::error::Release tag '${TAG}' not found in platform-lsp"
+                echo "Available tags:"
+                echo "$TAGS_WITH_DATES" | head -20 | while IFS=' ' read -r T D; do
+                  echo "  ${T} (${D})"
+                done
+                exit 1
+              fi
+            done
+            echo "✓ Using manually specified releases"
+          else
+            HEAD_RELEASE=$(echo "$TAGS_WITH_DATES" | awk 'NR==1 {print $1}')
+            BASE_RELEASE=$(echo "$TAGS_WITH_DATES" | awk 'NR==2 {print $1}')
+            echo "✓ Auto-detected releases"
+          fi
+
+          if [[ -z "$HEAD_RELEASE" ]]; then
+            echo "::error::No tags found in platform-lsp"
+            exit 1
+          fi
+          if [[ -z "$BASE_RELEASE" ]]; then
+            echo "::error::Only one tag found in platform-lsp — need at least two"
+            exit 1
+          fi
+          if [[ "$HEAD_RELEASE" == "$BASE_RELEASE" ]]; then
+            echo "::error::HEAD and BASE releases resolved to the same tag: ${HEAD_RELEASE}"
+            exit 1
+          fi
+
+          echo "✓ HEAD release (latest):   ${HEAD_RELEASE}"
+          echo "✓ BASE release (previous): ${BASE_RELEASE}"
+          echo "release_head=${HEAD_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_base=${BASE_RELEASE}" >> "$GITHUB_OUTPUT"
+
+          # ── Step 2: Resolve module versions ────────────────────────
+          > /tmp/found_head.txt
+          > /tmp/found_base.txt
+          > /tmp/tags_head.txt
+          > /tmp/tags_base.txt
+          > /tmp/apps_head.txt
+          > /tmp/apps_base.txt
+
+          resolve_modules_for_release() {
+            local RELEASE_TAG="$1"
+            local SUFFIX="$2"
+            local FOUND_FILE="/tmp/found_${SUFFIX}.txt"
+            local TAGS_FILE="/tmp/tags_${SUFFIX}.txt"
+            local APPS_FILE="/tmp/apps_${SUFFIX}.txt"
+
+            echo ""
+            echo "::group::Resolving modules for release ${RELEASE_TAG} (${SUFFIX})"
+
+            local INSTALL_JSON
+            INSTALL_JSON=$(git -C /tmp/platform-lsp show \
+              "${RELEASE_TAG}:install-applications.json" 2>/dev/null) || {
+              echo "::error::Cannot read install-applications.json at tag ${RELEASE_TAG}"
+              echo "::endgroup::"
+              return 1
+            }
+
+            echo "Applications in ${RELEASE_TAG}:"
+            echo "$INSTALL_JSON" | jq -r '.[].id' | sed 's/^/  /'
+            echo ""
+
+            local REMAINING=("${TARGET_MODULES[@]}")
+            local APP_IDS
+            mapfile -t APP_IDS < <(echo "$INSTALL_JSON" | jq -r '.[].id')
+
+            for APP_ID in "${APP_IDS[@]}"; do
+              [[ -z "$APP_ID" ]] && continue
+              [[ ${#REMAINING[@]} -eq 0 ]] && break
+
+              local APP_VERSION
+              APP_VERSION=$(echo "$APP_ID" \
+                | grep -oP '\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$' || true)
+              if [[ -z "$APP_VERSION" ]]; then
+                echo "  ⚠ Cannot parse version from '${APP_ID}', skipping"
+                continue
+              fi
+              local APP_NAME="${APP_ID%-"${APP_VERSION}"}"
+
+              local TEMPLATE_URL="https://raw.githubusercontent.com/folio-org/${APP_NAME}/v${APP_VERSION}/${APP_NAME}.template.json"
+              local TEMPLATE
+              TEMPLATE=$(curl -sf \
+                -H "Authorization: token ${GH_TOKEN}" \
+                "$TEMPLATE_URL" 2>/dev/null || true)
+
+              if [[ -z "$TEMPLATE" ]]; then
+                continue
+              fi
+
+              # ── Log ALL modules in this application template ───────
+              local ALL_MODS
+              ALL_MODS=$(echo "$TEMPLATE" | jq -r '.modules[]? | "\(.name) \(.version)"' 2>/dev/null || true)
+              if [[ -n "$ALL_MODS" ]]; then
+                local MOD_COUNT
+                MOD_COUNT=$(echo "$ALL_MODS" | wc -l)
+
+                # Check if any target module is in this app
+                local HAS_TARGET=false
+                for MOD in "${REMAINING[@]}"; do
+                  if echo "$ALL_MODS" | grep -q "^${MOD} "; then
+                    HAS_TARGET=true
+                    break
+                  fi
+                done
+
+                if [[ "$HAS_TARGET" == "true" ]]; then
+                  echo "  ┌── ${APP_NAME} v${APP_VERSION} (${MOD_COUNT} modules)"
+                  echo "$ALL_MODS" | while IFS=' ' read -r MNAME MVER; do
+                    local MARKER="  │   "
+                    for TGT in "${TARGET_MODULES[@]}"; do
+                      if [[ "$MNAME" == "$TGT" ]]; then
+                        MARKER="  │ ► "
+                        break
+                      fi
+                    done
+                    echo "${MARKER}${MNAME} v${MVER}"
+                  done
+                  echo "  └──"
+                fi
+              fi
+
+              # ── Resolve target modules ─────────────────────────────
+              local NEW_REMAINING=()
+              for MOD in "${REMAINING[@]}"; do
+                local MOD_VERSION
+                MOD_VERSION=$(echo "$TEMPLATE" | jq -r \
+                  --arg m "$MOD" \
+                  '.modules[]? | select(.name == $m) | .version // empty' \
+                  2>/dev/null || true)
+
+                if [[ -n "$MOD_VERSION" ]]; then
+                  echo ""
+                  echo "  ✓ RESOLVED: ${MOD} v${MOD_VERSION} (from ${APP_NAME} v${APP_VERSION})"
+
+                  local SAFE_KEY
+                  SAFE_KEY=$(echo "${MOD}" | tr '-' '_')
+                  echo "${SAFE_KEY}_${SUFFIX}=v${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+                  echo "${SAFE_KEY}_${SUFFIX}_app=${APP_NAME} v${APP_VERSION}" >> "$GITHUB_OUTPUT"
+
+                  echo "${MOD}" >> "$FOUND_FILE"
+                  echo "${MOD}=v${MOD_VERSION}" >> "$TAGS_FILE"
+                  echo "${MOD}=${APP_NAME} v${APP_VERSION}" >> "$APPS_FILE"
+                else
+                  NEW_REMAINING+=("$MOD")
+                fi
+              done
+              REMAINING=("${NEW_REMAINING[@]+"${NEW_REMAINING[@]}"}")
+            done
+
+            if [[ ${#REMAINING[@]} -gt 0 ]]; then
+              for MOD in "${REMAINING[@]}"; do
+                echo "  ✗ ${MOD} NOT FOUND in any application for ${RELEASE_TAG}"
+              done
+            fi
+
+            echo "::endgroup::"
+          }
+
+          resolve_modules_for_release "$HEAD_RELEASE" "head"
+          resolve_modules_for_release "$BASE_RELEASE" "base"
+
+          # ── Summary table ──────────────────────────────────────────
+          echo ""
+          echo "┌─────────────────────────┬──────────────────────┬──────────────────────┐"
+          echo "│ Module                  │ base                 │ head                 │"
+          echo "├─────────────────────────┼──────────────────────┼──────────────────────┤"
+          for MOD in "${TARGET_MODULES[@]}"; do
+            BASE_TAG=$(grep "^${MOD}=" /tmp/tags_base.txt | head -1 | cut -d= -f2-)
+            HEAD_TAG=$(grep "^${MOD}=" /tmp/tags_head.txt | head -1 | cut -d= -f2-)
+            printf "│ %-23s │ %-20s │ %-20s │\n" "$MOD" "$BASE_TAG" "$HEAD_TAG"
+          done
+          echo "└─────────────────────────┴──────────────────────┴──────────────────────┘"
+
+  mod-inventory-storage:
+    needs: [resolve_tags]
+    uses: folio-org/mod-inventory-storage/.github/workflows/schema-changes-reporting.yml@schema-changes-action-improvements
     with:
-      base: ${{ inputs.base }}
-      head: ${{ inputs.head }}
+      base: ${{ needs.resolve_tags.outputs.mod_inventory_storage_base }}
+      head: ${{ needs.resolve_tags.outputs.mod_inventory_storage_head }}
       repository: folio-org/mod-inventory-storage
       artifact_name: report-mod-inventory-storage
     secrets: inherit
 
-  call-mod-users:
-    needs: call-mod-inventory-storage
-    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@master
+  mod-users:
+    needs: [resolve_tags]
+    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@schema-changes-action-improvements
     with:
-      base: ${{ inputs.base }}
-      head: ${{ inputs.head }}
+      base: ${{ needs.resolve_tags.outputs.mod_users_base }}
+      head: ${{ needs.resolve_tags.outputs.mod_users_head }}
       repository: folio-org/mod-users
       artifact_name: report-mod-users
     secrets: inherit
 
   collect-reports:
-    needs: [ call-mod-inventory-storage, call-mod-users]
+    needs: [mod-inventory-storage, mod-users]
     runs-on: ubuntu-latest
     steps:
       - name: Download all report artifacts
@@ -37,7 +275,15 @@ jobs:
           pattern: report-*
           path: reports
           merge-multiple: false
-          if-no-artifact-found: error
+
+      - name: Verify reports downloaded
+        run: |
+          COUNT=$(find reports -type f -name 'report.html' 2>/dev/null | wc -l)
+          echo "Found ${COUNT} report(s)"
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "::error::No report artifacts found"
+            exit 1
+          fi
 
       - name: Combine HTML reports with shared head/styles
         shell: bash
