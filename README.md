@@ -16,14 +16,14 @@ platform-lsp tag (e.g. R1-2025-csp-5)
                                          ↓
                               tag v19.5.4 in folio-org/mod-users
                                          ↓
-                              diff ramls/*.json between base and head tags
+                              diff ramls/**/*.json between base and head tags
 ```
 
 The workflow:
 
 1. **resolve_tags** — clones `platform-lsp`, determines two release tags,
    walks `install-applications.json` → app templates → module versions.
-2. **call-mod-**\* — calls each module's `schema-changes-reporting.yml`
+2. **call-mod-\*** — calls each module's `schema-changes-reporting.yml`
    with resolved `base`/`head` tags (runs in parallel).
 3. **collect-reports** — downloads individual HTML reports, merges them
    into a single `combined-report.html` artifact.
@@ -46,10 +46,10 @@ automatically.
 1. Go to **Actions** → **Run Remote Reporting** → **Run workflow**.
 2. Fill in both fields:
 
-| Field    | Example          | Description              |
-| -------- | ---------------- | ------------------------ |
-| **base** | `R1-2025-csp-4`  | Earlier release (before) |
-| **head** | `R1-2025-csp-5`  | Later release (after)    |
+| Field | Example | Description |
+| --- | --- | --- |
+| **base** | `R1-2025-csp-4` | Earlier release (before) |
+| **head** | `R1-2025-csp-5` | Later release (after) |
 
 3. Click **Run workflow**.
 
@@ -68,20 +68,20 @@ Individual module reports are also available as `report-mod-*` artifacts.
 
 ## Inputs
 
-| Input  | Required | Default                | Description                        |
-| ------ | -------- | ---------------------- | ---------------------------------- |
-| `base` | No       | *(auto: previous tag)* | BASE release tag in `platform-lsp` |
-| `head` | No       | *(auto: latest tag)*   | HEAD release tag in `platform-lsp` |
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `base` | No | *(auto: previous tag)* | BASE release tag in `platform-lsp` |
+| `head` | No | *(auto: latest tag)* | HEAD release tag in `platform-lsp` |
 
 ---
 
 ## Outputs / Artifacts
 
-| Artifact                       | Contents                           |
-| ------------------------------ | ---------------------------------- |
-| `combined-report`              | Merged HTML report for all modules |
-| `report-mod-inventory-storage` | Individual report (MD + HTML)      |
-| `report-mod-users`             | Individual report (MD + HTML)      |
+| Artifact | Contents |
+| --- | --- |
+| `combined-report` | Merged HTML report for all modules |
+| `report-mod-inventory-storage` | Individual report (MD + HTML) |
+| `report-mod-users` | Individual report (MD + HTML) |
 
 ---
 
@@ -109,12 +109,76 @@ central-reporting.yml
     └─ upload combined-report
 ```
 
+### Reusable workflow
+
+The diff logic lives in a single place —
+`.github/workflows/reusable-schema-changes.yml` in **this repository**.
+Each module repo contains only a thin caller that delegates to it:
+
+```
+folio-org/schema-changes-reporting
+  └─ .github/workflows/reusable-schema-changes.yml   ← reusable (all logic here)
+
+folio-org/mod-users
+  └─ .github/workflows/schema-changes-reporting.yml   ← thin caller (~20 lines)
+
+folio-org/mod-inventory-storage
+  └─ .github/workflows/schema-changes-reporting.yml   ← thin caller (~20 lines)
+```
+
+This means the diff logic is maintained in one place and all modules
+pick up fixes automatically.
+
 ---
 
 ## Adding a new module
 
-1. **Create** `schema-changes-reporting.yml` in the new module repo
-   (copy from `mod-users` or `mod-inventory-storage`).
+1. **Create** `.github/workflows/schema-changes-reporting.yml` in the
+   new module repo with the following content (adjust `name` and `paths`
+   if schemas are not in `ramls/`):
+
+   ```yaml
+   name: Schema changes (mod-new-module)
+
+   on:
+     push:
+       branches: ["**"]
+       paths:
+         - "ramls/**/*.json"
+         - "!ramls/examples/**"
+         - "!ramls/raml-util/**"
+     pull_request:
+       branches: ["**"]
+       paths:
+         - "ramls/**/*.json"
+         - "!ramls/examples/**"
+         - "!ramls/raml-util/**"
+     release:
+       types: [published]
+     workflow_dispatch:
+       inputs:
+         base:
+           description: "Optional base ref (tag/commit)"
+           required: false
+         head:
+           description: "Optional head ref (tag/commit)"
+           required: false
+
+   permissions:
+     contents: read
+     pull-requests: write
+
+   jobs:
+     schema-changes:
+       uses: folio-org/schema-changes-reporting/.github/workflows/reusable-schema-changes.yml@master
+       with:
+         repository: ${{ github.repository }}
+         base: ${{ github.event.inputs.base || '' }}
+         head: ${{ github.event.inputs.head || '' }}
+       permissions:
+         contents: read
+         pull-requests: write
+   ```
 
 2. **Edit `central-reporting.yml`:**
 
@@ -156,49 +220,15 @@ central-reporting.yml
 
 ---
 
-## Module workflow requirements
-
-Each module's `schema-changes-reporting.yml` must accept these
-`workflow_call` inputs:
-
-```yaml
-on:
-  workflow_call:
-    inputs:
-      base:
-        required: false
-        type: string
-      head:
-        required: false
-        type: string
-      repository:
-        required: false
-        type: string
-      artifact_name:
-        required: false
-        type: string
-```
-
-The module workflow must read inputs using the `inputs` context directly
-(not `github.event.inputs`) to work correctly when called from a
-`workflow_dispatch` caller:
-
-```bash
-BASE_IN="${{ inputs.base || '' }}"
-HEAD_IN="${{ inputs.head || '' }}"
-```
-
----
-
 ## Troubleshooting
 
-| Symptom                                                | Cause                                                  | Fix                                                        |
-| ------------------------------------------------------ | ------------------------------------------------------ | ---------------------------------------------------------- |
-| Module uses its own latest tags instead of passed ones | Module reads `github.event.inputs` instead of `inputs` | Change to `inputs.base` / `inputs.head` in module workflow |
-| `Release tag 'X' not found`                            | Typo in manual input                                   | Check available tags in `platform-lsp`                     |
-| `Specify both base and head`                           | Only one field filled                                  | Fill both or leave both empty                              |
-| `No report artifacts found`                            | Module workflow failed                                 | Check individual module job logs                           |
-| Wrong PREV_TAG with same-date tags                     | Sorting by date doesn't differentiate                  | Module workflows use `--sort=-version:refname`             |
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Module uses its own latest tags instead of passed ones | Module reads `github.event.inputs` instead of `inputs` | Ensure caller passes `base`/`head` via `with:`, reusable reads `inputs.*` |
+| `Release tag 'X' not found` | Typo in manual input | Check available tags in `platform-lsp` |
+| `Specify both base and head` | Only one field filled | Fill both or leave both empty |
+| `No report artifacts found` | Module workflow failed | Check individual module job logs |
+| Wrong PREV_TAG with same-date tags | Sorting by date doesn't differentiate | Reusable workflow uses `--sort=-version:refname` |
 
 ---
 
