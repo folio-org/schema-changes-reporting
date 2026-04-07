@@ -66,6 +66,43 @@ Individual module reports are also available as `report-mod-*` artifacts.
 
 ---
 
+## Module-level usage
+
+Each module's caller workflow also triggers independently — without going
+through central reporting. This is useful for reviewing schema changes
+during day-to-day development.
+
+### On push / pull request
+
+The workflow runs automatically when `ramls/**/*.json` (or other configured paths in `/.github/workflows/schema-changes-reporting.yml`) files change.
+On a pull request a sticky comment with the diff report is posted.
+On push the report is available in the **Actions** summary and as an artifact.
+
+### On release
+
+Triggered automatically when a release is published. Compares the new
+release tag against the previous one.
+
+### Manual run (workflow_dispatch)
+
+1. Go to the module repo → **Actions** → **Schema changes** → **Run workflow**.
+2. Optionally fill in **base** and **head** (any tag, branch, or commit SHA).
+3. Leave both empty to compare the two most recent tags automatically.
+4. Click **Run workflow**.
+
+### Artifacts
+
+Each run uploads two files:
+
+| File | Description |
+| --- | --- |
+| `report.md` | Raw Markdown diff |
+| `report.html` | Self-contained HTML report (open in browser) |
+
+Download them from the **Artifacts** section of the completed run.
+
+---
+
 ## Inputs
 
 | Input | Required | Default | Description |
@@ -112,12 +149,12 @@ central-reporting.yml
 ### Reusable workflow
 
 The diff logic lives in a single place —
-`.github/workflows/reusable-schema-changes.yml` in **this repository**.
+`.github/workflows/schema-changes-reporting.yml` in **this repository**.
 Each module repo contains only a thin caller that delegates to it:
 
 ```
 folio-org/schema-changes-reporting
-  └─ .github/workflows/reusable-schema-changes.yml   ← reusable (all logic here)
+  └─ .github/workflows/schema-changes-reporting.yml   ← reusable (all logic here)
 
 folio-org/mod-users
   └─ .github/workflows/schema-changes-reporting.yml   ← thin caller (~20 lines)
@@ -170,7 +207,7 @@ pick up fixes automatically.
 
    jobs:
      schema-changes:
-       uses: folio-org/schema-changes-reporting/.github/workflows/reusable-schema-changes.yml@master
+       uses: folio-org/schema-changes-reporting/.github/workflows/schema-changes-reporting.yml@master
        with:
          repository: ${{ github.repository }}
          base: ${{ github.event.inputs.base || '' }}
@@ -236,8 +273,8 @@ pick up fixes automatically.
 
 ```yaml
 permissions:
-  contents: read        # clone repos, fetch templates
-  pull-requests: write  # PR comments (module workflows)
+   contents: read        # clone repos, fetch templates
+   pull-requests: write  # PR comments (module workflows)
 ```
 
 `secrets: inherit` passes `GITHUB_TOKEN` to module workflows for
