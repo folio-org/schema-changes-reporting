@@ -1,0 +1,298 @@
+name: Schema changes (reusable action - NOT TO RUN DIRECTLY)
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: "Optional base ref (tag/commit)"
+        required: false
+        type: string
+      head:
+        description: "Optional head ref (tag/commit)"
+        required: false
+        type: string
+      repository:
+        required: false
+        type: string
+      artifact_name:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: schema-diff-${{ inputs.repository || github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history incl. tags)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          repository: ${{ inputs.repository || github.repository }}
+
+      - name: Determine BASE/HEAD
+        id: refs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          BASE_IN="${{ inputs.base || '' }}"
+          HEAD_IN="${{ inputs.head || '' }}"
+
+          # Helper: first commit in repository (ultimate fallback)
+          root_commit() { git rev-list --max-parents=0 HEAD | tail -n1; }
+
+          case "${{ github.event_name }}" in
+            push)
+              BEFORE="${{ github.event.before }}"
+              # FIX: first push to a new branch sends all-zero SHA
+              if [[ "$BEFORE" =~ ^0+$ ]]; then
+                BEFORE="$(git rev-parse HEAD~1 2>/dev/null || root_commit)"
+              fi
+              BASE="${BASE_IN:-$BEFORE}"
+              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+              ;;
+            pull_request)
+              BASE="${BASE_IN:-${{ github.event.pull_request.base.sha }}}"
+              HEAD="${HEAD_IN:-${{ github.event.pull_request.head.sha }}}"
+              ;;
+            release)
+              CUR_TAG="${{ github.event.release.tag_name }}"
+              HEAD="${HEAD_IN:-$CUR_TAG}"
+              # FIX: grep -A1 returns CUR_TAG itself when it is the last tag;
+              # awk prints the NEXT line after the match and exits
+              PREV_TAG="$(git tag --sort=-version:refname \
+                | awk -v cur="$CUR_TAG" 'found {print; exit} $0==cur {found=1}' || true)"
+              [[ -z "$PREV_TAG" ]] && PREV_TAG="$(git tag --sort=version:refname \
+                | head -n1 || true)"
+              # FIX: guard against PREV_TAG resolving to CUR_TAG (single-tag repo)
+              [[ -z "$PREV_TAG" || "$PREV_TAG" == "$CUR_TAG" ]] \
+                && PREV_TAG="$(root_commit)"
+              BASE="${BASE_IN:-$PREV_TAG}"
+              ;;
+            workflow_dispatch|workflow_call)
+              if [[ -n "$BASE_IN" || -n "$HEAD_IN" ]]; then
+                HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+                # FIX: derive BASE relative to provided HEAD, not checked-out HEAD
+                BASE="${BASE_IN:-$(git rev-parse "${HEAD}~1" 2>/dev/null || root_commit)}"
+              else
+                CUR_TAG="$(git tag --sort=-version:refname | sed -n '1p' || true)"
+                PREV_TAG="$(git tag --sort=-version:refname | sed -n '2p' || true)"
+                if [[ -n "$CUR_TAG" && -n "$PREV_TAG" ]]; then
+                  HEAD="$CUR_TAG"
+                  BASE="$PREV_TAG"
+                else
+                  HEAD="${GITHUB_SHA}"
+                  BASE="$(git rev-parse HEAD~1 2>/dev/null || root_commit)"
+                fi
+              fi
+              ;;
+            *)
+              HEAD="${HEAD_IN:-${GITHUB_SHA}}"
+              BASE="${BASE_IN:-$(git rev-parse HEAD~1 2>/dev/null || root_commit)}"
+              ;;
+          esac
+
+          for REF_NAME in BASE HEAD; do
+            REF_VAL="${!REF_NAME}"
+            if ! git rev-parse --verify "$REF_VAL" >/dev/null 2>&1; then
+              echo "::error::${REF_NAME} ref '${REF_VAL}' does not exist in repository"
+              exit 1
+            fi
+          done
+
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "✓ BASE=$BASE"
+          echo "✓ HEAD=$HEAD"
+
+      - name: Build report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          BASE="${{ steps.refs.outputs.base }}"
+          HEAD="${{ steps.refs.outputs.head }}"
+          MAX_LINES=500
+          REPO_NAME="${{ inputs.repository || github.repository }}"
+
+          # OPT: single temp dir with automatic cleanup (was: scattered mktemp, never cleaned)
+          TMPDIR="$(mktemp -d)"
+          trap 'rm -rf "$TMPDIR"' EXIT
+          mkfile() { mktemp "$TMPDIR/$1.XXXXXX"; }
+
+          truncate_or_all() {
+            local LINES
+            LINES=$(wc -l < "$1" || echo 0)
+            if (( LINES > MAX_LINES )); then
+              head -n "$MAX_LINES" "$1"
+              echo "_Output truncated to ${MAX_LINES} lines._"
+            else
+              cat "$1"
+            fi
+          }
+
+          # FIX: write to report.md directly alongside GITHUB_STEP_SUMMARY
+          # (was: cat GITHUB_STEP_SUMMARY > report.md — fragile, may include other steps' output)
+          REPORT="report.md"
+          : > "$REPORT"
+          out() { tee -a "$REPORT" >> "$GITHUB_STEP_SUMMARY"; }
+          emit() { printf '%s\n' "$@" | out; }
+
+          # ── Header ─────────────────────────────────────────────────
+          emit "## JSON Schema Changes (\`$REPO_NAME\`)" \
+               "" \
+               "- Base: \`$BASE\`" \
+               "- Head: \`$HEAD\`" \
+               ""
+
+          # ── Detect changed files ───────────────────────────────────
+          git -c diff.renames=true diff --name-status -M "$BASE" "$HEAD" \
+            -- ':(glob)ramls/**/*.json' \
+               ':!ramls/examples/' \
+               ':!ramls/raml-util/' > "$TMPDIR/status.txt" || true
+
+          if [[ ! -s "$TMPDIR/status.txt" ]]; then
+            emit "_No JSON schema changes detected in \`ramls/\`._"
+            exit 0
+          fi
+
+          # ── Changed-files table ────────────────────────────────────
+          emit "### Changed files" \
+               "" \
+               "| Status | File (HEAD) |" \
+               "|---|---|"
+
+          CHANGES=()
+          while IFS= read -r LINE; do
+            CHANGES+=("$LINE")
+          done < "$TMPDIR/status.txt"
+
+          for LINE in "${CHANGES[@]}"; do
+            IFS=$'\t' read -r S A B <<< "$LINE"
+            FILE="$A"
+            [[ "$S" == R* ]] && FILE="$B"
+            case "$S" in
+              M)  STATUS="Modified" ;;
+              A)  STATUS="Added" ;;
+              D)  STATUS="Deleted" ;;
+              R*) STATUS="Renamed (${S#R}%)" ;;
+              C*) STATUS="Copied (${S#C}%)" ;;
+              T)  STATUS="Type changed" ;;
+              U)  STATUS="Unmerged" ;;
+              X)  STATUS="Unknown" ;;
+              B)  STATUS="Broken pairing" ;;
+              *)  STATUS="$S" ;;
+            esac
+            emit "| $STATUS | \`$FILE\` |"
+          done
+
+          emit "" \
+               "### Schema changes" \
+               ""
+
+          # ── Per-file diffs ─────────────────────────────────────────
+          for LINE in "${CHANGES[@]}"; do
+            IFS=$'\t' read -r S A B <<< "$LINE"
+            BASE_PATH="$A"; HEAD_PATH="$A"; TITLE="$A"
+            [[ "$S" == R* ]] && { HEAD_PATH="$B"; TITLE="$B"; }
+
+            emit "#### \`$TITLE\`"
+
+            # Extract file content at each ref (empty if file doesn't exist at that ref)
+            BASE_RAW="$(mkfile base_raw)"; HEAD_RAW="$(mkfile head_raw)"
+            git show "$BASE:$BASE_PATH" 2>/dev/null > "$BASE_RAW" || : > "$BASE_RAW"
+            git show "$HEAD:$HEAD_PATH" 2>/dev/null > "$HEAD_RAW" || : > "$HEAD_RAW"
+
+            # Normalize JSON for structural comparison
+            BASE_NORM="$(mkfile base_json)"; HEAD_NORM="$(mkfile head_json)"
+            VALID_BASE=1; VALID_HEAD=1
+            jq -S . < "$BASE_RAW" > "$BASE_NORM" 2>/dev/null \
+              || { VALID_BASE=0; echo '{}' > "$BASE_NORM"; }
+            jq -S . < "$HEAD_RAW" > "$HEAD_NORM" 2>/dev/null \
+              || { VALID_HEAD=0; echo '{}' > "$HEAD_NORM"; }
+
+            NORM_DIFF="$(mkfile norm_diff)"
+            if ! diff -u --label "$TITLE (base)" --label "$TITLE (head)" \
+                 "$BASE_NORM" "$HEAD_NORM" > "$NORM_DIFF"; then
+              emit '```diff'
+              truncate_or_all "$NORM_DIFF" | out
+              emit '```'
+            else
+              (( VALID_BASE == 0 || VALID_HEAD == 0 )) \
+                && emit "_Note: one of the versions is not valid JSON — raw diff only._"
+              emit "_No structural changes (after normalization)_" ""
+
+              RAW_DIFF="$(mkfile raw_diff)"
+              diff -u --label "$TITLE (base)" --label "$TITLE (head)" \
+                "$BASE_RAW" "$HEAD_RAW" > "$RAW_DIFF" || true
+
+              # FIX: only show raw diff section when there are actual differences
+              if [[ -s "$RAW_DIFF" ]]; then
+                emit "_Showing raw textual diff (formatting/whitespace changes may appear)_"
+                emit '```diff'
+                truncate_or_all "$RAW_DIFF" | out
+                emit '```'
+              else
+                emit "_Files are identical._"
+              fi
+            fi
+
+            emit ""
+          done
+
+      - name: Ensure report exists
+        if: ${{ github.event_name == 'pull_request' }}
+        run: test -s report.md || { echo "::error::report.md is missing or empty"; exit 1; }
+
+      - name: Comment PR with report
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: "Schema Changes Report"
+          recreate: true
+          path: report.md
+
+      - name: Install pandoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc
+
+      - name: Convert report.md → report.html
+        shell: bash
+        run: |
+          cat > style.css <<'CSS'
+          body{margin:2rem auto;max-width:900px;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#24292f}
+          h1,h2,h3{border-bottom:1px solid #d0d7de;padding-bottom:.3rem}
+          pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+          pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}
+          table{border-collapse:collapse;width:100%}
+          th,td{border:1px solid #d0d7de;padding:6px 10px}
+          blockquote{color:#57606a;border-left:4px solid #d0d7de;padding:0 1rem;margin:0}
+          CSS
+
+          if pandoc --help 2>&1 | grep -q -- '--embed-resources'; then
+            EMBED="--embed-resources --standalone"
+          else
+            EMBED="--self-contained"
+          fi
+
+          pandoc --from=gfm --to=html5 --standalone \
+            --metadata=pagetitle:"Schema Changes Report" \
+            --css=style.css $EMBED \
+            -o report.html report.md
+
+      - name: Upload artifacts (MD + HTML)
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ inputs.artifact_name || format('report-{0}-{1}', github.run_id, github.job) }}
+          path: |
+            report.md
+            report.html
+          if-no-files-found: error
+          retention-days: 7
