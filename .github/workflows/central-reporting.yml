@@ -273,8 +273,8 @@ jobs:
     needs: [resolve_tags]
     uses: ./.github/workflows/reusable-schema-changes.yml
     with:
-      base: ${{ needs.resolve_tags.outputs.mod_users_base }}
-      head: ${{ needs.resolve_tags.outputs.mod_users_head }}
+      base: ${{ needs.resolve_tags.outputs.mod_inventory_base }}
+      head: ${{ needs.resolve_tags.outputs.mod_inventory_head }}
       repository: folio-org/mod-inventory
       artifact_name: report-mod-inventory
     secrets: inherit
