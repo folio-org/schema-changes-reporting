@@ -257,7 +257,7 @@ jobs:
 
   mod-users:
     needs: [resolve_tags]
-    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@schema-changes-action-improvements
+    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@MODUSERS-571
     with:
       base: ${{ needs.resolve_tags.outputs.mod_users_base }}
       head: ${{ needs.resolve_tags.outputs.mod_users_head }}
