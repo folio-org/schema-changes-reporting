@@ -1,4 +1,4 @@
-name: Schema changes (reusable)
+name: Schema changes (reusable action - NOT TO RUN DIRECTLY)
 
 on:
   workflow_call:
