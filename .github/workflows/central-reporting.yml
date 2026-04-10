@@ -28,6 +28,10 @@ jobs:
       mod_users_head: ${{ steps.resolve.outputs.mod_users_head }}
       mod_users_base_app: ${{ steps.resolve.outputs.mod_users_base_app }}
       mod_users_head_app: ${{ steps.resolve.outputs.mod_users_head_app }}
+      mod_inventory_base: ${{ steps.resolve.outputs.mod_inventory_base }}
+      mod_inventory_head: ${{ steps.resolve.outputs.mod_inventory_head }}
+      mod_inventory_base_app: ${{ steps.resolve.outputs.mod_inventory_base_app }}
+      mod_inventory_head_app: ${{ steps.resolve.outputs.mod_inventory_head_app }}
     steps:
       - name: Resolve module tags from platform-lsp releases
         id: resolve
@@ -38,7 +42,7 @@ jobs:
           set -Eeuo pipefail
 
           # ── Configuration ──────────────────────────────────────────
-          TARGET_MODULES=("mod-inventory-storage" "mod-users")
+          TARGET_MODULES=("mod-inventory-storage" "mod-users" "mod-inventory")
 
           # ── Step 1: Determine latest two release tags ──────────────
           echo "::group::Clone platform-lsp"
@@ -265,8 +269,18 @@ jobs:
       artifact_name: report-mod-users
     secrets: inherit
 
+  mod-inventory:
+    needs: [resolve_tags]
+    uses: ./.github/workflows/reusable-schema-changes.yml
+    with:
+      base: ${{ needs.resolve_tags.outputs.mod_users_base }}
+      head: ${{ needs.resolve_tags.outputs.mod_users_head }}
+      repository: folio-org/mod-inventory
+      artifact_name: report-mod-inventory
+    secrets: inherit
+
   collect-reports:
-    needs: [mod-inventory-storage, mod-users]
+    needs: [mod-inventory-storage, mod-users, mod-inventory]
     runs-on: ubuntu-latest
     steps:
       - name: Download all report artifacts
