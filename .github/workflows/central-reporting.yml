@@ -257,7 +257,17 @@ jobs:
 
   mod-users:
     needs: [resolve_tags]
-    uses: folio-org/mod-users/.github/workflows/schema-changes-reporting.yml@schema-changes-action-improvements
+    uses: folio-org/mod-users/.github/workflows/module-schema-changes.yml@schema-changes-action-improvements
+    with:
+      base: ${{ needs.resolve_tags.outputs.mod_users_base }}
+      head: ${{ needs.resolve_tags.outputs.mod_users_head }}
+      repository: folio-org/mod-users
+      artifact_name: report-mod-users
+    secrets: inherit
+
+  mod-inventory:
+    needs: [resolve_tags]
+    uses: folio-org/mod-inventory/.github/workflows/module-schema-changes.yml@master
     with:
       base: ${{ needs.resolve_tags.outputs.mod_users_base }}
       head: ${{ needs.resolve_tags.outputs.mod_users_head }}
@@ -266,7 +276,7 @@ jobs:
     secrets: inherit
 
   collect-reports:
-    needs: [mod-inventory-storage, mod-users]
+    needs: [mod-inventory-storage, mod-users, mod-inventory]
     runs-on: ubuntu-latest
     steps:
       - name: Download all report artifacts
