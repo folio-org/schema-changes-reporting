@@ -1,0 +1,15 @@
+{
+  "_comment": "To add a new module: append its repo name to 'modules'.",
+  "modules": [
+    "mod-inventory-storage",
+    "mod-users",
+    "mod-inventory",
+    "mod-orders-storage",
+    "mod-invoice-storage",
+    "mod-finance-storage",
+    "mod-organizations-storage",
+    "mod-circulation-storage",
+    "mod-source-record-storage"
+  ]
+}
+
