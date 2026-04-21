@@ -1,7 +1,8 @@
-# Central Reporting — Schema Changes Across Releases
+# Schema Changes Reporting
 
-Compares JSON schemas between two `platform-lsp` releases and produces
-a combined HTML report showing structural changes in module schemas.
+Compares JSON schemas between two `platform-lsp` releases and produces a
+combined HTML report showing structural changes across FOLIO module
+repositories — including changes inside git submodules (e.g. `acq-models`).
 
 ---
 
@@ -17,17 +18,52 @@ platform-lsp tag (e.g. R1-2025-csp-5)
                               tag v19.5.4 in folio-org/mod-users
                                          ↓
                               diff ramls/**/*.json between base and head tags
+                              + diff schemas inside submodules (filtered per module)
 ```
 
 The workflow:
 
-1. **resolve_tags** — clones `platform-lsp`, determines two release tags,
+1. **resolve_tags** — clones `platform-lsp`, reads two release tags,
    walks `install-applications.json` → app templates → module versions.
-2. **mod-\*** — calls the reusable `reusable-schema-changes.yml` (hosted in
-   **this** repo) for each module with resolved `base`/`head` tags (runs in
-   parallel).
-3. **collect-reports** — downloads individual HTML reports, merges them
-   into a single `combined-report.html` artifact.
+2. **schema-diff** — calls `reusable-schema-changes.yml` for each module
+   in parallel (dynamic matrix from `modules.json`).
+3. **collect-reports** — downloads per-module Markdown reports, combines
+   them into a single timestamped HTML artifact, then cleans up
+   intermediate artifacts.
+
+### Submodule filtering
+
+Some modules share submodules (e.g. `ramls/acq-models`) that contain
+schemas for many different modules. The report builder traces `$ref` and
+`!include` references from the parent repo's schemas into the submodule,
+then performs a BFS to find all transitively referenced files. Only
+changes relevant to the current module appear in its report section.
+
+---
+
+## Tracked modules
+
+The module list is defined in a single config file —
+`.github/config/modules.json`:
+
+```json
+{
+  "modules": [
+    "mod-inventory-storage",
+    "mod-users",
+    "mod-inventory",
+    "mod-orders-storage",
+    "mod-invoice-storage",
+    "mod-finance-storage",
+    "mod-organizations-storage",
+    "mod-circulation-storage",
+    "mod-source-record-storage"
+  ]
+}
+```
+
+Adding or removing a module is a one-line edit in this file — no YAML or
+script changes required.
 
 ---
 
@@ -48,7 +84,7 @@ automatically.
 2. Fill in both fields:
 
 | Field | Example | Description |
-| --- | --- | --- |
+|---|---|---|
 | **base** | `R1-2025-csp-4` | Earlier release (before) |
 | **head** | `R1-2025-csp-5` | Later release (after) |
 
@@ -61,23 +97,22 @@ automatically.
 
 1. Open the completed workflow run.
 2. Scroll to **Artifacts**.
-3. Download **combined-report** (single HTML file).
-
-Individual module reports are also available as `report-mod-*` artifacts.
+3. Download `report_<timestamp>` — contains a self-contained HTML file
+   and the raw Markdown source.
 
 ---
 
 ## Module-level usage
 
-Each module's caller workflow also triggers independently — without going
-through central reporting. This is useful for reviewing schema changes
-during day-to-day development.
+The reusable workflow can also be triggered independently from a module
+repo, without going through central reporting.
 
 ### On push / pull request
 
-The workflow runs automatically when `ramls/**/*.json` (or other configured paths in `/.github/workflows/schema-changes-reporting.yml`) files change.
-On a pull request a sticky comment with the diff report is posted.
-On push the report is available in the **Actions** summary and as an artifact.
+The workflow runs automatically when `ramls/**/*.json` (or other
+configured paths) change. On a pull request a sticky comment with the
+diff report is posted. On push the report is available in the **Actions**
+summary and as an artifact.
 
 ### On release
 
@@ -91,37 +126,6 @@ release tag against the previous one.
 3. Leave both empty to compare the two most recent tags automatically.
 4. Click **Run workflow**.
 
-### Artifacts
-
-Each run uploads two files:
-
-| File | Description |
-| --- | --- |
-| `report.md` | Raw Markdown diff |
-| `report.html` | Self-contained HTML report (open in browser) |
-
-Download them from the **Artifacts** section of the completed run.
-
----
-
-## Inputs
-
-| Input | Required | Default | Description |
-| --- | --- | --- | --- |
-| `base` | No | *(auto: previous tag)* | BASE release tag in `platform-lsp` |
-| `head` | No | *(auto: latest tag)* | HEAD release tag in `platform-lsp` |
-
----
-
-## Outputs / Artifacts
-
-| Artifact | Contents |
-| --- | --- |
-| `combined-report` | Merged HTML report for all modules |
-| `report-mod-inventory-storage` | Individual report (MD + HTML) |
-| `report-mod-users` | Individual report (MD + HTML) |
-| `report-mod-inventory` | Individual report (MD + HTML) |
-
 ---
 
 ## Architecture
@@ -130,123 +134,96 @@ Download them from the **Artifacts** section of the completed run.
 central-reporting.yml
 │
 ├─ resolve_tags (ubuntu-latest)
-│   ├─ clone platform-lsp
+│   ├─ clone platform-lsp (blob-less)
 │   ├─ list tags sorted by creation date
 │   ├─ select HEAD/BASE releases (manual or auto)
 │   ├─ parse install-applications.json for each release
-│   ├─ fetch app-*.template.json for each application
+│   ├─ fetch app-*.template.json (parallel, throttled)
 │   ├─ extract module versions (e.g. mod-users v19.5.4 → tag v19.5.4)
-│   └─ output: mod_*_base, mod_*_head
+│   └─ output: modules JSON matrix [{name, base, head, base_app, head_app}]
 │
-├─ mod-inventory-storage ──┐
-│   (parallel)              ├─ collect-reports
-├─ mod-users ───────────────┤
-├─ mod-inventory ───────────┘
+├─ schema-diff (matrix: each module in parallel)
+│   ├─ checkout target module repo (full history + submodules, blob:none)
+│   ├─ checkout workflow scripts (.schema-reporting/)
+│   ├─ refs-resolver.sh → determine BASE/HEAD refs
+│   ├─ report-builder.sh → diff schemas + submodule schemas (filtered)
+│   └─ upload report.md artifact
 │
 └─ collect-reports (ubuntu-latest)
     ├─ download report-* artifacts
-    ├─ merge HTML files
-    └─ upload combined-report
+    ├─ reports-combiner.sh → merge into MD + HTML (pandoc)
+    ├─ artifacts-cleaner.sh → delete per-module artifacts
+    └─ upload report_<timestamp>.{md,html}
+```
+
+### Repository layout
+
+```
+folio-org/schema-changes-reporting
+├─ .github/
+│  ├─ config/
+│  │  └─ modules.json                      ← module list (one-line edits)
+│  ├─ scripts/
+│  │  ├─ lib/
+│  │  │  └─ helpers.sh                     ← shared functions
+│  │  ├─ releases-resolver.sh              ← resolve module versions from platform-lsp
+│  │  ├─ refs-resolver.sh                  ← determine BASE/HEAD git refs
+│  │  ├─ report-builder.sh                 ← build schema diff report (main logic)
+│  │  ├─ reports-combiner.sh               ← merge per-module reports into HTML
+│  │  └─ artifacts-cleaner.sh              ← delete intermediate artifacts
+│  ├─ tests/
+│  │  ├─ helpers.bats                      ← unit tests for helpers.sh
+│  │  ├─ refs-resolver.bats                ← unit tests for refs-resolver.sh
+│  │  ├─ report-builder.bats               ← unit tests for report-builder.sh
+│  │  └─ reports-combiner.bats             ← unit tests for reports-combiner.sh
+│  └─ workflows/
+│     ├─ central-reporting.yml             ← orchestrator workflow
+│     └─ reusable-schema-changes.yml       ← reusable diff workflow
+├─ run-tests.sh                            ← local test runner
+└─ README.md
 ```
 
 ### Reusable workflow
 
-All diff logic lives in a single place —
-`.github/workflows/reusable-schema-changes.yml` in **this repository**.
+All diff logic lives in `reusable-schema-changes.yml` in **this
+repository**. `central-reporting.yml` calls it via a dynamic matrix —
+**no workflow file is required in the module repo** for central reporting.
 
-`central-reporting.yml` calls it directly — **no workflow file is required
-in the module repo** for central reporting to work.
-
-Module repos contain only a thin caller workflow that is used for **local
-triggers** (push, pull request, release, manual dispatch):
+Module repos only need a thin caller workflow for **local triggers**
+(push, pull request, release, manual dispatch):
 
 ```
-folio-org/schema-changes-reporting
-  ├─ .github/workflows/reusable-schema-changes.yml  ← all diff logic (reusable)
-  └─ .github/workflows/central-reporting.yml        ← orchestrator
-
 folio-org/mod-users
-  └─ .github/workflows/schema-changes-reporting.yml ← thin caller (local triggers only)
-
-folio-org/mod-inventory-storage
-  └─ .github/workflows/schema-changes-reporting.yml ← thin caller (local triggers only)
-
-folio-org/mod-inventory
-  └─ .github/workflows/schema-changes-reporting.yml ← thin caller (local triggers only)
+  └─ .github/workflows/schema-changes-reporting.yml  ← thin caller
 ```
-
-> **Central reporting vs local actions:**
->
-> - **Central reporting** (`central-reporting.yml`) resolves module versions
->   from `platform-lsp` and calls `reusable-schema-changes.yml` directly —
->   no changes needed in the module repo.
-> - **Local actions** (push diffs, PR comments, release comparisons, manual
->   dispatch from the module repo) require a thin caller workflow to be
->   present in that module repo.
 
 ---
 
 ## Adding a new module
 
-Adding a module to central reporting **does not require any changes in the
-module repo**. Editing `central-reporting.yml` alone is sufficient for the
-module to appear in combined reports.
+### Step 1 — Edit `modules.json` (required for central reporting)
 
-A caller workflow in the module repo is only needed if you also want
-**local actions** (per-commit diffs, PR comments, release comparisons,
-manual runs from that repo).
+Add the module name to `.github/config/modules.json`:
 
-### Step 1 — Edit `central-reporting.yml` (required for central reporting)
-
-**a.** Add outputs in `resolve_tags`:
-
-```yaml
-outputs:
-  # ... existing outputs ...
-  mod_new_module_base: ${{ steps.resolve.outputs.mod_new_module_base }}
-  mod_new_module_head: ${{ steps.resolve.outputs.mod_new_module_head }}
-  mod_new_module_base_app: ${{ steps.resolve.outputs.mod_new_module_base_app }}
-  mod_new_module_head_app: ${{ steps.resolve.outputs.mod_new_module_head_app }}
-```
-
-**b.** Add module name to `TARGET_MODULES` array:
-
-```bash
-TARGET_MODULES=("mod-inventory-storage" "mod-users" "mod-inventory" "mod-new-module")
-```
-
-**c.** Add a job that calls the reusable workflow:
-
-```yaml
-mod-new-module:
-  needs: [resolve_tags]
-  uses: ./.github/workflows/reusable-schema-changes.yml
-  with:
-    base: ${{ needs.resolve_tags.outputs.mod_new_module_base }}
-    head: ${{ needs.resolve_tags.outputs.mod_new_module_head }}
-    repository: folio-org/mod-new-module
-    artifact_name: report-mod-new-module
-  secrets: inherit
-```
-
-**d.** Add the new job to `collect-reports` needs:
-
-```yaml
-collect-reports:
-  needs: [mod-inventory-storage, mod-users, mod-inventory, mod-new-module]
+```json
+{
+  "modules": [
+    "mod-inventory-storage",
+    "mod-users",
+    ...
+    "mod-new-module"
+  ]
+}
 ```
 
 That's it — after merging, the next central reporting run will include
-`mod-new-module` automatically.
+the new module automatically.
 
----
-
-### Step 2 — Add a caller workflow in the module repo (optional, for local actions)
+### Step 2 — Add a caller workflow in the module repo (optional)
 
 Skip this step if you only need the module in combined reports.
 
-Create `.github/workflows/schema-changes-reporting.yml` in the module repo
-(adjust `name` and `paths` if schemas are not in `ramls/`):
+Create `.github/workflows/schema-changes-reporting.yml` in the module repo:
 
 ```yaml
 name: Schema changes (mod-new-module)
@@ -291,56 +268,83 @@ jobs:
       pull-requests: write
 ```
 
-> The caller references `reusable-schema-changes.yml` (not
-> `schema-changes-reporting.yml`).  All diff logic is maintained in this
-> single file — all modules pick up fixes automatically.
+---
+
+## Scripts
+
+| Script | Purpose |
+|---|---|
+| `releases-resolver.sh` | Clones `platform-lsp`, resolves module versions for two releases, outputs a JSON matrix |
+| `refs-resolver.sh` | Determines BASE/HEAD git refs based on event type (push, PR, release, dispatch) |
+| `report-builder.sh` | Diffs `ramls/**/*.json` between two refs, handles submodules with per-module filtering |
+| `reports-combiner.sh` | Merges per-module `report.md` files into a single MD + self-contained HTML via pandoc |
+| `artifacts-cleaner.sh` | Deletes intermediate `report-*` artifacts after the combined report is built |
+| `lib/helpers.sh` | Shared functions: `truncate_or_all`, `status_label`, `resolve_path`, `extract_json_refs`, `extract_raml_includes`, `is_path_in_submodule`, `strip_sm_prefix` |
+
+---
+
+## Testing
+
+Unit tests use [bats-core](https://github.com/bats-core/bats-core). Each
+script has a corresponding `.bats` file in `.github/tests/`.
+
+### Prerequisites
+
+```bash
+brew install bats-core bash jq python3
+```
+
+### Running tests
+
+```bash
+# Run all tests
+./run-tests.sh
+
+# Run tests for a specific script
+./run-tests.sh helpers
+./run-tests.sh refs-resolver
+./run-tests.sh report-builder
+./run-tests.sh reports-combiner
+```
+
+> **Note:** bash 4+ is required (for `mapfile`). On macOS the runner
+> auto-detects Homebrew bash if the system bash is too old.
+
+---
+
+## Inputs (reusable workflow)
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `base` | No | *(auto-detected)* | Base ref (tag, branch, or SHA) |
+| `head` | No | *(auto-detected)* | Head ref (tag, branch, or SHA) |
+| `repository` | No | `github.repository` | Target module repo (e.g. `folio-org/mod-users`) |
+| `artifact_name` | No | auto-generated | Name for the uploaded report artifact |
+| `schema_paths` | No | *(empty)* | Extra pathspec globs for JSON schemas (space-separated) |
 
 ---
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
-| --- | --- | --- |
-| Module uses its own latest tags instead of passed ones | Module reads `github.event.inputs` instead of `inputs` | Ensure caller passes `base`/`head` via `with:`, reusable reads `inputs.*` |
+|---|---|---|
 | `Release tag 'X' not found` | Typo in manual input | Check available tags in `platform-lsp` |
 | `Specify both base and head` | Only one field filled | Fill both or leave both empty |
-| `No report artifacts found` | Module workflow failed | Check individual module job logs |
-| Wrong PREV_TAG with same-date tags | Sorting by date doesn't differentiate | Reusable workflow uses `--sort=-version:refname` |
-| Module not found in any application | Module not listed in `platform-lsp` install manifests | Verify module name matches exactly what appears in app templates |
+| `No report artifacts found` | All module workflows failed | Check individual module job logs |
+| Module not in report | Module not in any `platform-lsp` app template | Verify module name matches what appears in app templates |
+| Submodule shows unrelated schemas | `$ref` tracing didn't find references | Check that parent schemas properly reference submodule files |
+| `bash 4+ required` | macOS ships bash 3.x | `brew install bash` |
 
 ---
 
 ## Permissions
 
-Permissions are already declared in the workflow files — no manual configuration needed.
+Declared in workflow files — no manual configuration needed.
 
-**`central-reporting.yml`** declares at the top level:
+| Workflow | `contents` | `pull-requests` | `actions` |
+|---|---|---|---|
+| `central-reporting.yml` | read | write | write |
+| `reusable-schema-changes.yml` | read | write | — |
 
-```yaml
-permissions:
-  contents: read   # clone platform-lsp, fetch app templates
-  pull-requests: write
-```
-
-Each module job passes `secrets: inherit` so that `GITHUB_TOKEN` is
-forwarded to `reusable-schema-changes.yml` for repository checkout and
-artifact upload.
-
-**`reusable-schema-changes.yml`** declares:
-
-```yaml
-permissions:
-  contents: read        # checkout module repo, read tags
-  pull-requests: write  # post sticky PR comment with diff report
-```
-
-**Module caller workflows** (thin callers in module repos) should declare
-the same permissions so that local triggers (push, PR, release) work
-correctly:
-
-```yaml
-permissions:
-  contents: read
-  pull-requests: write
-```
-
+Module jobs receive `secrets: inherit` so that `GITHUB_TOKEN` is
+forwarded for repository checkout, artifact upload, and PR comments.
