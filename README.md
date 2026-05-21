@@ -144,7 +144,7 @@ central-reporting.yml
 │
 ├─ schema-diff (matrix: each module in parallel)
 │   ├─ checkout target module repo (full history + submodules, blob:none)
-│   ├─ checkout workflow scripts (.schema-reporting/)
+│   ├─ checkout workflow scripts (.schema-changes-reporting/)
 │   ├─ refs-resolver.sh → determine BASE/HEAD refs
 │   ├─ report-builder.sh → diff schemas + submodule schemas (filtered)
 │   └─ upload report.md artifact

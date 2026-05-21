@@ -64,7 +64,7 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
-          path: .schema-reporting
+          path: .schema-changes-reporting
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
 
@@ -78,7 +78,7 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: bash .schema-reporting/.github/scripts/refs-resolver.sh
+        run: bash .schema-changes-reporting/.github/scripts/refs-resolver.sh
 
       - name: Build schema-changes report
         env:
@@ -87,7 +87,7 @@ jobs:
           REPO_NAME: ${{ inputs.repository || github.repository }}
           EXTRA_PATHS: ${{ inputs.schema_paths }}
           REPORT_FILE: report.md
-        run: bash .schema-reporting/.github/scripts/report-builder.sh
+        run: bash .schema-changes-reporting/.github/scripts/report-builder.sh
 
       - name: Ensure report exists
         if: ${{ github.event_name == 'pull_request' }}
