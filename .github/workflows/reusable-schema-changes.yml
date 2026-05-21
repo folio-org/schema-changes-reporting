@@ -62,8 +62,7 @@ jobs:
       - name: Checkout workflow scripts
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.sha }}
+          repository: folio-org/schema-changes-reporting
           path: .schema-changes-reporting
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
