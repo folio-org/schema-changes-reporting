@@ -46,56 +46,72 @@ changes relevant to the current module appear in its report section.
 
 ## Tracked modules
 
-The module list is defined in a single config file —
-`.github/config/modules.json`:
-
-```json
-{
-  "modules": [
-    "mod-inventory-storage",
-    "mod-users",
-    "mod-inventory",
-    "mod-orders-storage",
-    "mod-invoice-storage",
-    "mod-finance-storage",
-    "mod-organizations-storage",
-    "mod-circulation-storage",
-    "mod-source-record-storage"
-  ]
-}
-```
-
-Adding or removing a module is a one-line edit in this file — no YAML or
-script changes required.
+The authoritative module list lives in a single config file —
+[`.github/config/modules.json`](.github/config/modules.json) — which is the
+**single source of truth** (**63** modules). The tables below enumerate the full
+roster with rationale and are a **manually maintained mirror**: update them
+whenever `modules.json` changes.
 
 ### Selection criterion
 
-A module is tracked only if it **owns a database that persists the entities
-its JSON schemas describe**, and those schemas are diffable JSON. Concretely:
+A module is tracked only if it **owns a database that persists the entities its
+JSON schemas describe**, and those schemas are diffable JSON. Concretely:
 
 - **RMB modules** — `ramls/**/*.json` mapped to DB tables via
   `src/main/resources/templates/db_scripts/schema.json`.
-- **Spring modules** — Liquibase/Flyway-managed tables plus JSON schemas
-  under `src/main/resources/**`.
+- **Spring modules** — Liquibase/Flyway-managed tables plus JSON schemas under
+  `src/main/resources/**`.
 
-## Out of scope
+### Included modules (63)
 
-The following module classes are intentionally **excluded** — a schema change
-in them does not represent a change to persisted data this tool is meant to
-track:
+**A. RMB — own DB, `ramls/*.json` ↔ tables via `db_scripts/schema.json` (39)**
 
-| Category | Why excluded | Examples |
+`mod-audit`, `mod-circulation-storage`, `mod-configuration`, `mod-copycat`,
+`mod-courses`, `mod-custom-fields`, `mod-data-export`, `mod-data-import`,
+`mod-data-import-converter-storage`, `mod-di-converter-storage`, `mod-email`,
+`mod-erm-usage`, `mod-erm-usage-harvester`, `mod-event-config`, `mod-feesfines`,
+`mod-finance-storage`, `mod-finc-config`, `mod-gobi`, `mod-idm-connect`,
+`mod-inventory-storage`, `mod-invoice`, `mod-invoice-storage`, `mod-kb-ebsco-java`,
+`mod-login`, `mod-login-saml`, `mod-notify`, `mod-oai-pmh`, `mod-orders`,
+`mod-orders-storage`, `mod-organizations-storage`, `mod-patron`,
+`mod-patron-blocks`, `mod-permissions`, `mod-pubsub`, `mod-source-record-manager`,
+`mod-source-record-storage`, `mod-template-engine`, `mod-users`, `mod-vendors`
+
+**B. Spring + Liquibase — DB tables + JSON schemas (14)**
+
+`mod-bulk-operations`, `mod-circulation-item`, `mod-consortia-keycloak`,
+`mod-dcb`, `mod-entities-links`, `mod-fqm-manager`, `mod-inn-reach`, `mod-lists`,
+`mod-password-validator`, `mod-reading-room`, `mod-remote-storage`,
+`mod-requests-mediated`, `mod-rtac-cache`, `mod-tlr`
+
+**C. Spring + Flyway/JPA — DB tables + JSON schemas (5)**
+
+`mod-linked-data`, `mod-login-keycloak`, `mod-roles-keycloak`, `mod-scheduler`,
+`mod-users-keycloak`
+
+**D. Business-logic (no own DB, included deliberately — entities persist in the paired `*-storage`) (5)**
+
+`mod-circulation`, `mod-inventory`, `mod-finance`, `mod-organizations`,
+`mod-users-bl`
+
+> Note: `mod-vendors` is archived and absent from current releases — the resolver
+> simply skips it (no error).
+
+## Out of scope (39)
+
+The following modules are intentionally **excluded** — a schema change in them
+does not represent a change to persisted data this tool is meant to track:
+
+| Category | Why excluded | Modules |
 |---|---|---|
-| BL / proxy / BFF | No own DB; entities persist in the paired `*-storage` module | `mod-circulation-bff`, `mod-rtac`, `mod-user-import`, `mod-inventory-import` |
-| Edge / gateway | Stateless; expose external APIs | `mod-ebsconet`, `mod-okapi-facade` |
-| Search / reporting / external-DB | Index (ES) or query external stores; don't own the schema entities | `mod-search`, `mod-reporting`, `mod-ldp`, `mod-reservoir`, `mod-meta-storage` |
-| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-locations`, `mod-notes`, `mod-tags`, `mod-consortia`, `mod-quick-marc`, `mod-licenses`, `mod-serials-management`, `mod-marc-migrations`, `mod-record-specifications`, `mod-linked-data-import` |
+| BL / proxy / BFF / edge — no own DB | Entities persist in the paired `*-storage`; own schemas are transient DTOs | `mod-circulation-bff`, `mod-inventory-import`, `mod-inventory-update`, `mod-user-import`, `mod-rtac`, `mod-authtoken`, `mod-ebsconet`, `mod-okapi-facade`, `mod-mosaic`, `mod-batch-print`, `mod-hub-data-import`, `mod-graph-rebuilder`, `mod-bulk-edit` |
+| No relational DB / external / read-only | Index (ES) or query external stores; don't own the schema entities | `mod-ldp`, `mod-reporting`, `mod-meta-storage`, `mod-reservoir`, `mod-search`, `mod-camunda`, `mod-sender`, `mod-settings`, `mod-calendar`, `mod-eusage-reports`, `mod-erm-usage-counter` |
+| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-licenses`, `mod-serials-management`, `mod-consortia`, `mod-locations`, `mod-notes`, `mod-tags`, `mod-quick-marc`, `mod-marc-migrations`, `mod-record-specifications`, `mod-bursar-export`, `mod-atom-feed-reader`, `mod-linked-data-import`, `mod-workflow` |
 | YAML + root submodule | Reference a root-level shared submodule (`folio-export-common`) from OpenAPI YAML; the submodule BFS (seeded from `ramls/`) cannot scope changes to the module | `mod-data-export-spring`, `mod-data-export-worker` |
-| Stateless / config / orchestration | No persisted schema entities | `mod-authtoken`, `mod-settings`, `mod-sender`, `mod-camunda`, `mod-workflow`, `mod-calendar` |
 
-> Modules that persist data but publish their API as **OpenAPI YAML** (not
-> JSON Schema) are excluded only because the differ is JSON-based. They could
-> be re-included if YAML diffing is added.
+> Modules that persist data but publish their API as **OpenAPI YAML** (not JSON
+> Schema) are excluded only because the differ is JSON-based. They could be
+> re-included if YAML diffing is added.
 
 ---
 
