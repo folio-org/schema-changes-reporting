@@ -10,9 +10,11 @@ repositories — including changes inside git submodules (e.g. `acq-models`).
 
 ```
 platform-lsp tag (e.g. R1-2025-csp-5)
-  └─ install-applications.json
+  └─ install-applications.json        (≤ R1-2025-csp-7)
+     platform-descriptor.json         (≥ R1-2025-csp-8, "applications")
        └─ app-platform-minimal-2.0.49
-            └─ app-platform-minimal.template.json
+            └─ app-platform-minimal.template.json   (legacy)
+               application.lock.json                (current, pinned versions)
                  └─ modules: [ { "name": "mod-users", "version": "19.5.4" } ]
                                          ↓
                               tag v19.5.4 in folio-org/mod-users
@@ -24,7 +26,8 @@ platform-lsp tag (e.g. R1-2025-csp-5)
 The workflow:
 
 1. **resolve_tags** — clones `platform-lsp`, reads two release tags,
-   walks `install-applications.json` → app templates → module versions.
+   walks `install-applications.json` (≤ csp-7) or `platform-descriptor.json`
+   (≥ csp-8) → app templates / lock files → module versions.
 2. **schema-diff** — calls `reusable-schema-changes.yml` for each module
    in parallel (dynamic matrix from `modules.json`).
 3. **collect-reports** — downloads per-module Markdown reports, combines
@@ -166,8 +169,8 @@ central-reporting.yml
 │   ├─ clone platform-lsp (blob-less)
 │   ├─ list tags sorted by creation date
 │   ├─ select HEAD/BASE releases (manual or auto)
-│   ├─ parse install-applications.json for each release
-│   ├─ fetch app-*.template.json (parallel, throttled)
+│   ├─ parse install-applications.json / platform-descriptor.json per release
+│   ├─ fetch app manifests (<app>.template.json or application.lock.json)
 │   ├─ extract module versions (e.g. mod-users v19.5.4 → tag v19.5.4)
 │   └─ output: modules JSON matrix [{name, base, head, base_app, head_app}]
 │
