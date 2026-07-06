@@ -65,6 +65,35 @@ The module list is defined in a single config file —
 Adding or removing a module is a one-line edit in this file — no YAML or
 script changes required.
 
+### Selection criterion
+
+A module is tracked only if it **owns a database that persists the entities
+its JSON schemas describe**, and those schemas are diffable JSON. Concretely:
+
+- **RMB modules** — `ramls/**/*.json` mapped to DB tables via
+  `src/main/resources/templates/db_scripts/schema.json`.
+- **Spring modules** — Liquibase/Flyway-managed tables plus JSON schemas
+  under `src/main/resources/**`.
+
+## Out of scope
+
+The following module classes are intentionally **excluded** — a schema change
+in them does not represent a change to persisted data this tool is meant to
+track:
+
+| Category | Why excluded | Examples |
+|---|---|---|
+| BL / proxy / BFF | No own DB; entities persist in the paired `*-storage` module | `mod-circulation-bff`, `mod-rtac`, `mod-user-import`, `mod-inventory-import` |
+| Edge / gateway | Stateless; expose external APIs | `mod-ebsconet`, `mod-okapi-facade` |
+| Search / reporting / external-DB | Index (ES) or query external stores; don't own the schema entities | `mod-search`, `mod-reporting`, `mod-ldp`, `mod-reservoir`, `mod-meta-storage` |
+| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-locations`, `mod-notes`, `mod-tags`, `mod-consortia`, `mod-quick-marc`, `mod-licenses`, `mod-serials-management`, `mod-marc-migrations`, `mod-record-specifications`, `mod-linked-data-import` |
+| YAML + root submodule | Reference a root-level shared submodule (`folio-export-common`) from OpenAPI YAML; the submodule BFS (seeded from `ramls/`) cannot scope changes to the module | `mod-data-export-spring`, `mod-data-export-worker` |
+| Stateless / config / orchestration | No persisted schema entities | `mod-authtoken`, `mod-settings`, `mod-sender`, `mod-camunda`, `mod-workflow`, `mod-calendar` |
+
+> Modules that persist data but publish their API as **OpenAPI YAML** (not
+> JSON Schema) are excluded only because the differ is JSON-based. They could
+> be re-included if YAML diffing is added.
+
 ---
 
 ## Usage
