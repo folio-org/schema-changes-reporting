@@ -75,11 +75,29 @@ echo "✓ BASE release (previous): ${BASE_RELEASE}"
 declare -A MOD_BASE_TAG MOD_HEAD_TAG MOD_BASE_APP MOD_HEAD_APP
 
 # fetch_template <app_name> <app_version> <out_file>
-# Fetches an application template; output written to given file.
+# Fetches an application module manifest with CONCRETE (pinned) module
+# versions; output written to given file (empty file on failure).
+#
+# Two supported layouts (tried in order):
+#   Legacy: "<app>.template.json"      — modules: [ {name, version: "x.y.z"} ]
+#   Current: "application.lock.json"   — modules: [ {id, name, version: "x.y.z"} ]
+#
+# NOTE: the current "application.template.json" is intentionally NOT used —
+# it carries version ranges (e.g. "~1.13.1"), not tags. Only the lock file
+# has resolved, pinned versions. Both supported files expose
+# `.modules[].name` / `.modules[].version`, so downstream parsing is uniform.
 fetch_template() {
   local APP_NAME="$1" APP_VERSION="$2" OUT="$3"
-  local URL="https://raw.githubusercontent.com/folio-org/${APP_NAME}/v${APP_VERSION}/${APP_NAME}.template.json"
-  curl -sf -H "Authorization: token ${GH_TOKEN:-}" "$URL" -o "$OUT" 2>/dev/null || : > "$OUT"
+  local BASE="https://raw.githubusercontent.com/folio-org/${APP_NAME}/v${APP_VERSION}"
+  local CAND
+  : > "$OUT"
+  for CAND in "${APP_NAME}.template.json" "application.lock.json"; do
+    if curl -sf -H "Authorization: token ${GH_TOKEN:-}" \
+        "${BASE}/${CAND}" -o "$OUT" 2>/dev/null && [[ -s "$OUT" ]]; then
+      return 0
+    fi
+  done
+  : > "$OUT"
 }
 
 # resolve_modules_for_release <release_tag> <suffix>
@@ -90,28 +108,44 @@ resolve_modules_for_release() {
   echo ""
   echo "::group::Resolving modules for release ${RELEASE_TAG} (${SUFFIX})"
 
-  local INSTALL_JSON
-  INSTALL_JSON=$(git -C "$PLATFORM_DIR" show \
-    "${RELEASE_TAG}:install-applications.json" 2>/dev/null) || {
-    echo "::error::Cannot read install-applications.json at tag ${RELEASE_TAG}"
+  # ── Read applications list (two supported platform-lsp formats) ─────────
+  # Legacy (≤ R1-2025-csp-7): install-applications.json
+  #   [ { "id": "app-name-x.y.z" }, ... ]
+  # Current (≥ R1-2025-csp-8):  platform-descriptor.json
+  #   { "applications": { "required": [ {name, version} ],
+  #                       "optional": [ {name, version} ] } }
+  # Both are normalized to APPS_JSON: [ { "name": ..., "version": ... } ].
+  local RAW APPS_SRC APPS_JSON
+  if RAW=$(git -C "$PLATFORM_DIR" show \
+      "${RELEASE_TAG}:install-applications.json" 2>/dev/null); then
+    APPS_SRC="install-applications.json"
+    APPS_JSON=$(echo "$RAW" | jq -c '
+      [ .[].id
+        | capture("^(?<n>.+)-(?<v>[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?)$")
+        | {name: .n, version: .v} ]')
+  elif RAW=$(git -C "$PLATFORM_DIR" show \
+      "${RELEASE_TAG}:platform-descriptor.json" 2>/dev/null); then
+    APPS_SRC="platform-descriptor.json"
+    APPS_JSON=$(echo "$RAW" | jq -c '
+      [ ((.applications.required // []) + (.applications.optional // []))[]
+        | {name: .name, version: .version} ]')
+  else
+    echo "::error::Cannot read install-applications.json or platform-descriptor.json at tag ${RELEASE_TAG}"
     echo "::endgroup::"
     return 1
-  }
+  fi
 
-  echo "Applications in ${RELEASE_TAG}:"
-  echo "$INSTALL_JSON" | jq -r '.[].id' | sed 's/^/  /'
+  echo "Applications in ${RELEASE_TAG} (from ${APPS_SRC}):"
+  echo "$APPS_JSON" | jq -r '.[] | "  \(.name)-\(.version)"'
   echo ""
 
-  # ── Parse app ids → (name, version) ────────────────────────────────────
+  # ── Parse normalized applications → (name, version) ────────────────────
   local -a APP_NAMES APP_VERSIONS
   while IFS=$'\t' read -r APP_NAME APP_VERSION; do
     [[ -z "$APP_NAME" ]] && continue
     APP_NAMES+=("$APP_NAME")
     APP_VERSIONS+=("$APP_VERSION")
-  done < <(echo "$INSTALL_JSON" | jq -r '
-    .[].id
-    | capture("^(?<n>.+)-(?<v>[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?)$")
-    | "\(.n)\t\(.v)"')
+  done < <(echo "$APPS_JSON" | jq -r '.[] | "\(.name)\t\(.version)"')
 
   # ── Fetch all templates in parallel ────────────────────────────────────
   local TMP
