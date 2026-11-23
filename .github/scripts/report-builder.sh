@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Builds a Markdown report of JSON schema changes between two refs for a
-# FOLIO module repository, including changes inside git submodules.
+# Builds a Markdown report of changes between two refs for a FOLIO module
+# repository. Changes are split into two areas, each labelled in the report:
+#   - API:      JSON schemas (ramls/**/*.json, extra paths, git submodules)
+#   - Database: RMB db_scripts (schema.json, *.ftl, *.sql), Liquibase
+#               changelogs and Flyway migrations
 #
 # Inputs (env):
 #   BASE, HEAD           - refs to compare (required)
 #   REPO_NAME            - e.g. "folio-org/mod-users"
-#   EXTRA_PATHS          - optional space-separated pathspec globs
+#   EXTRA_PATHS          - optional space-separated pathspec globs (API schemas)
+#   EXTRA_DB_PATHS       - optional space-separated pathspec globs (database)
 #   REPORT_FILE          - output file (default: report.md)
 #   GITHUB_STEP_SUMMARY  - GH Actions step summary path (optional)
 
@@ -15,6 +19,7 @@ BASE="${BASE:?BASE is required}"
 HEAD="${HEAD:?HEAD is required}"
 REPO_NAME="${REPO_NAME:-${GITHUB_REPOSITORY:-unknown/unknown}}"
 EXTRA_PATHS="${EXTRA_PATHS:-}"
+EXTRA_DB_PATHS="${EXTRA_DB_PATHS:-}"
 REPORT_FILE="${REPORT_FILE:-report.md}"
 MAX_LINES="${MAX_LINES:-500}"
 
@@ -27,11 +32,17 @@ mkfile() { mktemp "$TMPDIR_SCHEMA/$1.XXXXXX"; }
 
 : > "$REPORT_FILE"
 
+# The report body is buffered; the header and the API/Database summary are
+# prepended in finalize_report once all counts are known.
+BODY_FILE="$(mkfile body)"
+API_COUNT=0
+DB_COUNT=0
+
 # ── Output helpers ───────────────────────────────────────────────────────
 
 # out
-# Writes stdin to report file (and step summary if available).
-out()  { if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then tee -a "$REPORT_FILE" >> "$GITHUB_STEP_SUMMARY"; else tee -a "$REPORT_FILE" >/dev/null; fi; }
+# Appends stdin to the buffered report body.
+out()  { cat >> "$BODY_FILE"; }
 
 # emit <line...>
 # Writes lines to the report.
@@ -115,17 +126,96 @@ diff_schema_file() {
   emit ""
 }
 
+# ── Database files ───────────────────────────────────────────────────────
+
+# Locations of database definitions in FOLIO module repositories
+# (multi-module Maven projects keep them under <module>-server/, hence **/):
+#   RMB (Vert.x)    src/main/resources/templates/db_scripts/   schema.json, *.ftl, *.sql
+#   Spring/Liquibase src/main/resources/db/changelog/, src/main/resources/changelog/
+#   RMB + Liquibase src/main/resources/liquibase/
+#   Flyway          src/main/resources/db/migration/
+#   Other db files  src/main/resources/db/** (e.g. db/scripts/*.sql)
+#   Any SQL         **/*.sql outside tests (e.g. resources/template_create_tenant.sql,
+#                   scripts/remove-tenant-ids/*.sql)
+DB_GLOBS=(
+  '**/src/main/resources/templates/db_scripts/**'
+  '**/src/main/resources/db/**'
+  '**/src/main/resources/changelog/**'
+  '**/src/main/resources/liquibase/**'
+  '**/*.sql'
+)
+DB_EXCLUDE_GLOBS=(
+  '**/.keep' '**/.gitkeep'
+  '**/src/test/**' '**/test/**' '**/node_modules/**' '**/target/**'
+)
+
+# db_kind <path>
+# Classifies a database file by its location.
+db_kind() {
+  case "$1" in
+    */templates/db_scripts/schema.json|templates/db_scripts/schema.json) echo "RMB schema.json" ;;
+    */db_scripts/*defaultData*|*/db_scripts/*data-migration*)            echo "RMB seed/data migration" ;;
+    */templates/db_scripts/*|templates/db_scripts/*)                     echo "RMB script" ;;
+    */db/migration/*|db/migration/*)                                     echo "Flyway migration" ;;
+    */db/changelog/*|*/changelog/*|*/liquibase/*|db/changelog/*|changelog/*|liquibase/*) echo "Liquibase changelog" ;;
+    *.sql|*.SQL) echo "SQL script" ;;
+    *) echo "Database" ;;
+  esac
+}
+
+# diff_db_file <git_dir> <base_ref> <head_ref> <status> <path_a> <path_b> <display_prefix>
+# Diffs a database file. JSON files (schema.json) get a normalized diff;
+# everything else (SQL, FTL, Liquibase XML/YAML, CSV) a plain textual diff.
+diff_db_file() {
+  local GIT_DIR="$1" BASE_REF="$2" HEAD_REF="$3" S="$4" A="$5" B="$6" PREFIX="$7"
+
+  if [[ "${A,,}" == *.json || "${B,,}" == *.json ]]; then
+    diff_schema_file "$@"
+    return
+  fi
+
+  local BASE_PATH="$A" HEAD_PATH="$A" TITLE="${PREFIX}${A}"
+  [[ "$S" == R* ]] && { HEAD_PATH="$B"; TITLE="${PREFIX}${B}"; }
+
+  emit "#### \`$TITLE\` _($(db_kind "$HEAD_PATH"))_"
+
+  local BASE_RAW HEAD_RAW RAW_DIFF
+  BASE_RAW="$(mkfile base_raw)"; HEAD_RAW="$(mkfile head_raw)"; RAW_DIFF="$(mkfile raw_diff)"
+  git -C "$GIT_DIR" show "$BASE_REF:$BASE_PATH" 2>/dev/null > "$BASE_RAW" || : > "$BASE_RAW"
+  git -C "$GIT_DIR" show "$HEAD_REF:$HEAD_PATH" 2>/dev/null > "$HEAD_RAW" || : > "$HEAD_RAW"
+
+  if diff -u --label "$TITLE (base)" --label "$TITLE (head)" \
+       "$BASE_RAW" "$HEAD_RAW" > "$RAW_DIFF"; then
+    emit "_Files are identical._"
+  else
+    emit '```diff'
+    truncate_or_all "$RAW_DIFF" | out
+    emit '```'
+  fi
+  emit ""
+}
+
 # ── Section renderer ─────────────────────────────────────────────────────
 
-# render_section <status_file> <git_dir> <base_ref> <head_ref> <section_title> <display_prefix>
+# render_section <status_file> <git_dir> <base_ref> <head_ref> <section_title> <display_prefix> [diff_fn] [kind_fn]
 # Renders "Changed files" table + per-file diffs for a given status file.
+# diff_fn defaults to diff_schema_file; when kind_fn is given, the table gets
+# an extra "Kind" column.
 render_section() {
   local STATUS_FILE="$1" GIT_DIR="$2" BASE_REF="$3" HEAD_REF="$4" TITLE="$5" PREFIX="$6"
+  local DIFF_FN="${7:-diff_schema_file}" KIND_FN="${8:-}"
 
-  emit "### Changed files${TITLE:+ $TITLE}" \
-       "" \
-       "| Status | File (HEAD) |" \
-       "|---|---|"
+  if [[ -n "$KIND_FN" ]]; then
+    emit "### Changed files${TITLE:+ $TITLE}" \
+         "" \
+         "| Status | Kind | File (HEAD) |" \
+         "|---|---|---|"
+  else
+    emit "### Changed files${TITLE:+ $TITLE}" \
+         "" \
+         "| Status | File (HEAD) |" \
+         "|---|---|"
+  fi
 
   local -a CHANGES=()
   while IFS= read -r LINE; do CHANGES+=("$LINE"); done < "$STATUS_FILE"
@@ -134,7 +224,11 @@ render_section() {
   for LINE in "${CHANGES[@]}"; do
     IFS=$'\t' read -r S A B <<< "$LINE"
     FILE="$A"; [[ "$S" == R* ]] && FILE="$B"
-    emit "| $(status_label "$S") | \`${PREFIX}${FILE}\` |"
+    if [[ -n "$KIND_FN" ]]; then
+      emit "| $(status_label "$S") | $("$KIND_FN" "$FILE") | \`${PREFIX}${FILE}\` |"
+    else
+      emit "| $(status_label "$S") | \`${PREFIX}${FILE}\` |"
+    fi
   done
 
   emit "" \
@@ -143,32 +237,49 @@ render_section() {
 
   for LINE in "${CHANGES[@]}"; do
     IFS=$'\t' read -r S A B <<< "$LINE"
-    diff_schema_file "$GIT_DIR" "$BASE_REF" "$HEAD_REF" "$S" "$A" "$B" "$PREFIX"
+    "$DIFF_FN" "$GIT_DIR" "$BASE_REF" "$HEAD_REF" "$S" "$A" "$B" "$PREFIX"
   done
 }
 
-# ── Report header ────────────────────────────────────────────────────────
-emit "## JSON Schema Changes (\`$REPO_NAME\`)" \
-     "" \
-     "- Base: \`$BASE\`" \
-     "- Head: \`$HEAD\`" \
-     ""
+# finalize_report
+# Prepends the header and the API/Database summary to the buffered body,
+# writes REPORT_FILE and (if available) the GitHub step summary.
+finalize_report() {
+  {
+    printf '%s\n' "## Schema Changes (\`$REPO_NAME\`)" \
+                   "" \
+                   "- Base: \`$BASE\`" \
+                   "- Head: \`$HEAD\`" \
+                   "" \
+                   "| Area | Changed files |" \
+                   "|---|---|" \
+                   "| API (JSON schemas) | $API_COUNT |" \
+                   "| Database | $DB_COUNT |" \
+                   ""
+    cat "$BODY_FILE"
+  } > "$REPORT_FILE"
+  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && cat "$REPORT_FILE" >> "$GITHUB_STEP_SUMMARY"
+  return 0
+}
 
 HAS_CHANGES=0
 
-# ── Part 1: Direct JSON schema files ────────────────────────────────────
+# ── Part 1: API — direct JSON schema files ──────────────────────────────
 PATHSPECS=( ':(glob)ramls/**/*.json' ':!ramls/examples/' ':!ramls/raml-util/' )
 for EXTRA in $EXTRA_PATHS; do PATHSPECS+=( ":(glob)${EXTRA}" ); done
+# Database files are reported in their own section, never as API.
+for G in "${DB_GLOBS[@]}"; do PATHSPECS+=( ":(glob,exclude)${G}" ); done
 
 git -c diff.renames=true diff --name-status -M "$BASE" "$HEAD" \
   -- "${PATHSPECS[@]}" > "$TMPDIR_SCHEMA/status.txt" || true
 
 if [[ -s "$TMPDIR_SCHEMA/status.txt" ]]; then
   HAS_CHANGES=1
-  render_section "$TMPDIR_SCHEMA/status.txt" "." "$BASE" "$HEAD" "" ""
+  API_COUNT=$(( API_COUNT + $(wc -l < "$TMPDIR_SCHEMA/status.txt") ))
+  render_section "$TMPDIR_SCHEMA/status.txt" "." "$BASE" "$HEAD" "— API" ""
 fi
 
-# ── Part 2: Schemas inside git submodules ────────────────────────────────
+# ── Part 2: API — schemas inside git submodules ──────────────────────────
 # Some FOLIO modules store JSON schemas in submodules under ramls/
 # (e.g. ramls/acq-models, ramls/raml-storage). A normal diff on the parent
 # repo only sees the submodule-pointer commit change. We enter each
@@ -179,11 +290,9 @@ fi
 
 echo "Module name for submodule filtering: $MODULE_NAME"
 
+process_submodules() {
 GITMODULES_CONTENT=$(git show "$HEAD:.gitmodules" 2>/dev/null || true)
-[[ -z "$GITMODULES_CONTENT" ]] && {
-  (( HAS_CHANGES == 0 )) && emit "_No JSON schema changes detected (checked direct files and submodules)._"
-  exit 0
-}
+[[ -z "$GITMODULES_CONTENT" ]] && return 0
 
 # ── Extract submodule paths from .gitmodules ─────────────────────────────
 mapfile -t SUBMODULE_PATHS < <(
@@ -409,8 +518,9 @@ print(os.path.normpath(os.path.join(sys.argv[1], sys.argv[2])))" \
 
   # ── Render submodule section ───────────────────────────────────────────
   HAS_CHANGES=1
+  API_COUNT=$(( API_COUNT + $(wc -l < "$TMPDIR_SCHEMA/sm_status.txt") ))
   SM_LABEL="$SM_PATH"
-  emit "### Changed files in submodule \`$SM_LABEL\`" \
+  emit "### Changed files in submodule \`$SM_LABEL\` — API" \
        "" \
        "- Submodule base commit: \`$SM_BASE_COMMIT\`" \
        "- Submodule head commit: \`$SM_HEAD_COMMIT\`" \
@@ -425,7 +535,7 @@ print(os.path.normpath(os.path.join(sys.argv[1], sys.argv[2])))" \
   done < "$TMPDIR_SCHEMA/sm_status.txt"
 
   emit "" \
-       "### Schema changes in submodule \`$SM_LABEL\`" \
+       "### Schema changes in submodule \`$SM_LABEL\` — API" \
        ""
 
   while IFS= read -r LINE; do
@@ -436,8 +546,31 @@ print(os.path.normpath(os.path.join(sys.argv[1], sys.argv[2])))" \
 
   echo "::endgroup::"
 done
+}
+process_submodules
 
 if (( HAS_CHANGES == 0 )); then
-  emit "_No JSON schema changes detected (checked direct files and submodules)._"
+  emit "_No JSON schema changes detected (checked direct files and submodules)._" ""
 fi
+
+# ── Part 3: Database changes ─────────────────────────────────────────────
+# RMB db_scripts (schema.json, *.ftl, *.sql), Liquibase changelogs, Flyway
+# migrations. Locations are defined in DB_GLOBS; EXTRA_DB_PATHS adds more.
+DB_PATHSPECS=()
+for G in "${DB_GLOBS[@]}"; do DB_PATHSPECS+=( ":(glob)${G}" ); done
+for EXTRA in $EXTRA_DB_PATHS; do DB_PATHSPECS+=( ":(glob)${EXTRA}" ); done
+for G in "${DB_EXCLUDE_GLOBS[@]}"; do DB_PATHSPECS+=( ":(glob,exclude)${G}" ); done
+
+git -c diff.renames=true diff --name-status -M "$BASE" "$HEAD" \
+  -- "${DB_PATHSPECS[@]}" > "$TMPDIR_SCHEMA/db_status.txt" || true
+
+if [[ -s "$TMPDIR_SCHEMA/db_status.txt" ]]; then
+  DB_COUNT=$(( $(wc -l < "$TMPDIR_SCHEMA/db_status.txt") ))
+  render_section "$TMPDIR_SCHEMA/db_status.txt" "." "$BASE" "$HEAD" "— Database" "" \
+    diff_db_file db_kind
+else
+  emit "_No database changes detected (RMB db_scripts, Liquibase, Flyway)._" ""
+fi
+
+finalize_report
 
