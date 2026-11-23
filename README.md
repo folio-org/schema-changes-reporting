@@ -1,8 +1,13 @@
 # Schema Changes Reporting
 
-Compares JSON schemas between two `platform-lsp` releases and produces a
-combined HTML report showing structural changes across FOLIO module
-repositories — including changes inside git submodules (e.g. `acq-models`).
+Compares two `platform-lsp` releases and produces a combined HTML report
+showing changes across FOLIO module repositories. Every change is labelled
+by area:
+
+- **API** — JSON schemas (`ramls/**/*.json`), including changes inside git
+  submodules (e.g. `acq-models`).
+- **Database** — RMB `db_scripts` (`schema.json`, `*.ftl`, `*.sql`),
+  Liquibase changelogs and Flyway migrations.
 
 ---
 
@@ -19,8 +24,9 @@ platform-lsp tag (e.g. R1-2025-csp-5)
                                          ↓
                               tag v19.5.4 in folio-org/mod-users
                                          ↓
-                              diff ramls/**/*.json between base and head tags
-                              + diff schemas inside submodules (filtered per module)
+                              API:      diff ramls/**/*.json between base and head tags
+                                        + diff schemas inside submodules (filtered per module)
+                              Database: diff db_scripts / Liquibase / Flyway files
 ```
 
 The workflow:
@@ -33,6 +39,31 @@ The workflow:
 3. **collect-reports** — downloads per-module Markdown reports, combines
    them into a single timestamped HTML artifact, then cleans up
    intermediate artifacts.
+
+### API vs Database changes
+
+Each module report starts with a summary table (changed files per area) and
+then has separate sections: `Changed files — API` / `Schema changes — API`
+and `Changed files — Database` / `Schema changes — Database`. A file is
+never reported in both areas.
+
+Database locations (also matched inside multi-module Maven projects, e.g.
+`mod-inventory-storage-server/src/main/resources/...`; paths are under
+`src/main/resources/` unless noted):
+
+| Kind (report column) | Path (under `src/main/resources/`) | Typical modules |
+|---|---|---|
+| RMB `schema.json` | `templates/db_scripts/schema.json` | `mod-users`, `mod-orders-storage`, `mod-inventory-storage` |
+| RMB script / seed / data migration | `templates/db_scripts/**` (`*.sql`, `*.ftl`, `defaultData`, `data-migration`) | RMB modules |
+| Liquibase changelog | `db/changelog/**`, `changelog/**`, `liquibase/**` | Spring modules (`mod-entities-links`, `mod-scheduler`), `mod-source-record-storage`, `mod-pubsub` |
+| Flyway migration | `db/migration/**` | any module using Flyway |
+| Other DB files | `db/**` (e.g. `db/scripts/*.sql`, `db/source-views/**` in `mod-fqm-manager`) | `mod-entities-links`, `mod-fqm-manager` |
+| SQL script | any `*.sql` outside test directories, also outside `src/main/resources` (e.g. `resources/template_create_tenant.sql`, repo-level `scripts/**/*.sql`) | `mod-feesfines`, `mod-custom-fields`, `mod-orders-storage` |
+
+`schema.json` is compared as normalized JSON; SQL, FTL, Liquibase XML/YAML
+and CSV files get a plain textual diff. Placeholder files (`.keep`,
+`.gitkeep`) are ignored. Java-based migrations (`**/migration/*.java`) are
+not tracked. Use the `db_paths` input for other locations.
 
 ### Submodule filtering
 
@@ -48,7 +79,7 @@ changes relevant to the current module appear in its report section.
 
 The authoritative module list lives in a single config file —
 [`.github/config/modules.json`](.github/config/modules.json) — which is the
-**single source of truth** (**63** modules). The tables below enumerate the full
+**single source of truth** (**70** modules). The tables below enumerate the full
 roster with rationale and are a **manually maintained mirror**: update them
 whenever `modules.json` changes.
 
@@ -62,7 +93,7 @@ JSON schemas describe**, and those schemas are diffable JSON. Concretely:
 - **Spring modules** — Liquibase/Flyway-managed tables plus JSON schemas under
   `src/main/resources/**`.
 
-### Included modules (63)
+### Included modules (70)
 
 **A. RMB — own DB, `ramls/*.json` ↔ tables via `db_scripts/schema.json` (39)**
 
@@ -94,20 +125,32 @@ JSON schemas describe**, and those schemas are diffable JSON. Concretely:
 `mod-circulation`, `mod-inventory`, `mod-finance`, `mod-organizations`,
 `mod-users-bl`
 
+**E. Added for database-change tracking (7) — own DB, API as OpenAPI YAML (no JSON schemas)**
+
+`mod-data-export-spring`, `mod-data-export-worker`, `mod-marc-migrations`,
+`mod-notes`, `mod-quick-marc`, `mod-record-specifications`, `mod-tags`
+
+> For these modules the API section is empty; the report shows Database
+> changes only. `mod-data-export-spring` / `mod-data-export-worker` reference
+> a root-level shared submodule, so API changes inside it are not scoped to
+> the module. Modules that own a database but are not part of any
+> `platform-lsp` release (as of `R1-2025-csp-11`) are not tracked: see
+> *Out of scope*.
+
 > Note: `mod-vendors` is archived and absent from current releases — the resolver
 > simply skips it (no error).
 
-## Out of scope (39)
+## Out of scope (32)
 
 The following modules are intentionally **excluded** — a schema change in them
 does not represent a change to persisted data this tool is meant to track:
 
 | Category | Why excluded | Modules |
 |---|---|---|
-| BL / proxy / BFF / edge — no own DB | Entities persist in the paired `*-storage`; own schemas are transient DTOs | `mod-circulation-bff`, `mod-inventory-import`, `mod-inventory-update`, `mod-user-import`, `mod-rtac`, `mod-authtoken`, `mod-ebsconet`, `mod-okapi-facade`, `mod-mosaic`, `mod-batch-print`, `mod-hub-data-import`, `mod-graph-rebuilder`, `mod-bulk-edit` |
+| BL / proxy / BFF / edge — no own DB | Entities persist in the paired `*-storage`; own schemas are transient DTOs | `mod-circulation-bff`, `mod-inventory-import`, `mod-inventory-update`, `mod-user-import`, `mod-rtac`, `mod-authtoken`, `mod-ebsconet`, `mod-okapi-facade`, `mod-batch-print`, `mod-hub-data-import`, `mod-graph-rebuilder`, `mod-bulk-edit` |
 | No relational DB / external / read-only | Index (ES) or query external stores; don't own the schema entities | `mod-ldp`, `mod-reporting`, `mod-meta-storage`, `mod-reservoir`, `mod-search`, `mod-camunda`, `mod-sender`, `mod-settings`, `mod-calendar`, `mod-eusage-reports`, `mod-erm-usage-counter` |
-| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-licenses`, `mod-serials-management`, `mod-consortia`, `mod-locations`, `mod-notes`, `mod-tags`, `mod-quick-marc`, `mod-marc-migrations`, `mod-record-specifications`, `mod-bursar-export`, `mod-atom-feed-reader`, `mod-linked-data-import`, `mod-workflow` |
-| YAML + root submodule | Reference a root-level shared submodule (`folio-export-common`) from OpenAPI YAML; the submodule BFS (seeded from `ramls/`) cannot scope changes to the module | `mod-data-export-spring`, `mod-data-export-worker` |
+| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-licenses`, `mod-serials-management` |
+| Own DB, but not in any `platform-lsp` release | The resolver takes module versions from `platform-lsp` applications, so these cannot be diffed between releases | `mod-atom-feed-reader`, `mod-bursar-export`, `mod-consortia`, `mod-linked-data-import`, `mod-locations`, `mod-mosaic`, `mod-workflow` |
 
 > Modules that persist data but publish their API as **OpenAPI YAML** (not JSON
 > Schema) are excluded only because the differ is JSON-based. They could be
@@ -116,7 +159,9 @@ does not represent a change to persisted data this tool is meant to track:
 ### Selection criterion
 
 A module is tracked only if it **owns a database that persists the entities
-its JSON schemas describe**, and those schemas are diffable JSON. Concretely:
+its JSON schemas describe**, and those schemas are diffable JSON — or, for the
+database report, if it owns a database whose schema changes must be tracked
+even without JSON API schemas (group E). Concretely:
 
 - **RMB modules** — `ramls/**/*.json` mapped to DB tables via
   `src/main/resources/templates/db_scripts/schema.json`.
@@ -134,9 +179,8 @@ track:
 | BL / proxy / BFF | No own DB; entities persist in the paired `*-storage` module | `mod-circulation-bff`, `mod-rtac`, `mod-user-import`, `mod-inventory-import` |
 | Edge / gateway | Stateless; expose external APIs | `mod-ebsconet`, `mod-okapi-facade` |
 | Search / reporting / external-DB | Index (ES) or query external stores; don't own the schema entities | `mod-search`, `mod-reporting`, `mod-ldp`, `mod-reservoir`, `mod-meta-storage` |
-| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-locations`, `mod-notes`, `mod-tags`, `mod-consortia`, `mod-quick-marc`, `mod-licenses`, `mod-serials-management`, `mod-marc-migrations`, `mod-record-specifications`, `mod-linked-data-import` |
-| YAML + root submodule | Reference a root-level shared submodule (`folio-export-common`) from OpenAPI YAML; the submodule BFS (seeded from `ramls/`) cannot scope changes to the module | `mod-data-export-spring`, `mod-data-export-worker` |
-| Stateless / config / orchestration | No persisted schema entities | `mod-authtoken`, `mod-settings`, `mod-sender`, `mod-camunda`, `mod-workflow`, `mod-calendar` |
+| OpenAPI-YAML-only / data-only | Persist data but define APIs as YAML, or ship only reference/sample/DB-changelog JSON — nothing for the JSON differ | `mod-licenses`, `mod-serials-management` |
+| Stateless / config / orchestration | No persisted schema entities | `mod-authtoken`, `mod-settings`, `mod-sender`, `mod-camunda`, `mod-calendar` |
 
 > Modules that persist data but publish their API as **OpenAPI YAML** (not
 > JSON Schema) are excluded only because the differ is JSON-based. They could
@@ -223,7 +267,7 @@ central-reporting.yml
 │   ├─ checkout target module repo (full history + submodules, blob:none)
 │   ├─ checkout workflow scripts (.schema-changes-reporting/)
 │   ├─ refs-resolver.sh → determine BASE/HEAD refs
-│   ├─ report-builder.sh → diff schemas + submodule schemas (filtered)
+│   ├─ report-builder.sh → diff API schemas + submodule schemas (filtered) + DB files
 │   └─ upload report.md artifact
 │
 └─ collect-reports (ubuntu-latest)
@@ -353,7 +397,7 @@ jobs:
 |---|---|
 | `releases-resolver.sh` | Clones `platform-lsp`, resolves module versions for two releases, outputs a JSON matrix |
 | `refs-resolver.sh` | Determines BASE/HEAD git refs based on event type (push, PR, release, dispatch) |
-| `report-builder.sh` | Diffs `ramls/**/*.json` between two refs, handles submodules with per-module filtering |
+| `report-builder.sh` | Diffs API JSON schemas (`ramls/**/*.json`) and database files (RMB db_scripts, Liquibase, Flyway) between two refs, labels each area, handles submodules with per-module filtering |
 | `reports-combiner.sh` | Merges per-module `report.md` files into a single MD + self-contained HTML via pandoc |
 | `artifacts-cleaner.sh` | Deletes intermediate `report-*` artifacts after the combined report is built |
 | `lib/helpers.sh` | Shared functions: `truncate_or_all`, `status_label`, `resolve_path`, `extract_json_refs`, `extract_raml_includes`, `is_path_in_submodule`, `strip_sm_prefix` |
@@ -398,6 +442,7 @@ brew install bats-core bash jq python3
 | `repository` | No | `github.repository` | Target module repo (e.g. `folio-org/mod-users`) |
 | `artifact_name` | No | auto-generated | Name for the uploaded report artifact |
 | `schema_paths` | No | *(empty)* | Extra pathspec globs for JSON schemas (space-separated) |
+| `db_paths` | No | *(empty)* | Extra pathspec globs for database files (space-separated), in addition to the built-in locations |
 
 ---
 

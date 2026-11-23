@@ -195,3 +195,187 @@ teardown() {
   grep -q "Modified" "$REPORT_FILE"
 }
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Database changes (API vs Database labelling)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# run_builder <repo_dir> <base> <head> [extra_db_paths]
+run_builder() {
+  cd "$1"
+  export BASE="$2" HEAD="$3"
+  export REPO_NAME="folio-org/mod-db-test"
+  export EXTRA_PATHS=""
+  export EXTRA_DB_PATHS="${4:-}"
+  export REPORT_FILE="$TEST_TMP/db_report.md"
+  unset GITHUB_STEP_SUMMARY
+  run bash "$SCRIPT_DIR/report-builder.sh"
+  echo "OUTPUT: $output"
+  [[ "$status" -eq 0 ]]
+}
+
+# new_repo <name> → creates repo, cd's into it
+new_repo() {
+  DB_REPO="$TEST_TMP/$1"
+  git init -q "$DB_REPO"
+  cd "$DB_REPO"
+}
+
+@test "db-report: RMB schema.json + sql change is labelled Database, API untouched" {
+  new_repo mod-rmb
+  mkdir -p src/main/resources/templates/db_scripts
+  echo '{"scripts":[]}' > src/main/resources/templates/db_scripts/schema.json
+  echo 'CREATE TABLE a (id int);' > src/main/resources/templates/db_scripts/a.sql
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo '{"scripts":[{"run":"after"}]}' > src/main/resources/templates/db_scripts/schema.json
+  echo 'CREATE TABLE a (id int, name text);' > src/main/resources/templates/db_scripts/a.sql
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "— Database" "$REPORT_FILE"
+  grep -q "RMB schema.json" "$REPORT_FILE"
+  grep -q "RMB script" "$REPORT_FILE"
+  grep -q "^| Database | 2 |" "$REPORT_FILE"
+  grep -q "^| API (JSON schemas) | 0 |" "$REPORT_FILE"
+  ! grep -q "— API" "$REPORT_FILE"
+  grep -q "+CREATE TABLE a (id int, name text);" "$REPORT_FILE"
+}
+
+@test "db-report: Liquibase (db/changelog) and multi-module -server path detected" {
+  new_repo mod-lb
+  mkdir -p src/main/resources/db/changelog/changes mod-x-server/src/main/resources/liquibase/tenant/scripts
+  echo '<databaseChangeLog/>' > src/main/resources/db/changelog/changelog-master.xml
+  echo 'a' > mod-x-server/src/main/resources/liquibase/tenant/scripts/.keep
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo '<databaseChangeLog><include file="changes/v1.xml"/></databaseChangeLog>' > src/main/resources/db/changelog/changelog-master.xml
+  echo '<databaseChangeLog/>' > src/main/resources/db/changelog/changes/v1.xml
+  echo 'ALTER TABLE t ADD c int;' > mod-x-server/src/main/resources/liquibase/tenant/scripts/v1.sql
+  echo 'b' > mod-x-server/src/main/resources/liquibase/tenant/scripts/.keep
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "src/main/resources/db/changelog/changelog-master.xml" "$REPORT_FILE"
+  grep -q "src/main/resources/db/changelog/changes/v1.xml" "$REPORT_FILE"
+  grep -q "mod-x-server/src/main/resources/liquibase/tenant/scripts/v1.sql" "$REPORT_FILE"
+  grep -q "Liquibase changelog" "$REPORT_FILE"
+  # .keep files are ignored
+  ! grep -q "\.keep" "$REPORT_FILE"
+  grep -q "^| Database | 3 |" "$REPORT_FILE"
+}
+
+@test "db-report: API and DB changes land in separate labelled sections" {
+  new_repo mod-mixed
+  mkdir -p ramls/schemas src/main/resources/templates/db_scripts
+  echo '{"type":"object"}' > ramls/schemas/item.json
+  echo '{"scripts":[]}' > src/main/resources/templates/db_scripts/schema.json
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo '{"type":"object","properties":{"id":{"type":"string"}}}' > ramls/schemas/item.json
+  echo '{"scripts":[{"run":"before"}]}' > src/main/resources/templates/db_scripts/schema.json
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "^### Changed files — API" "$REPORT_FILE"
+  grep -q "^### Schema changes — API" "$REPORT_FILE"
+  grep -q "^### Changed files — Database" "$REPORT_FILE"
+  grep -q "^### Schema changes — Database" "$REPORT_FILE"
+  grep -q "^| API (JSON schemas) | 1 |" "$REPORT_FILE"
+  grep -q "^| Database | 1 |" "$REPORT_FILE"
+  # API section comes before the Database section
+  local api_ln db_ln
+  api_ln=$(grep -n "^### Changed files — API" "$REPORT_FILE" | cut -d: -f1)
+  db_ln=$(grep -n "^### Changed files — Database" "$REPORT_FILE" | cut -d: -f1)
+  (( api_ln < db_ln ))
+  # schema.json is NOT duplicated in the API section
+  [[ $(grep -c '^#### `src/main/resources/templates/db_scripts/schema.json`' "$REPORT_FILE") -eq 1 ]]
+}
+
+@test "db-report: no DB changes → explicit note, zero count" {
+  new_repo mod-nodb
+  mkdir -p ramls/schemas
+  echo '{"type":"object"}' > ramls/schemas/item.json
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo '{"type":"string"}' > ramls/schemas/item.json
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "No database changes detected" "$REPORT_FILE"
+  grep -q "^| Database | 0 |" "$REPORT_FILE"
+  grep -q "^| API (JSON schemas) | 1 |" "$REPORT_FILE"
+}
+
+@test "db-report: Flyway migration, renamed and deleted DB files" {
+  new_repo mod-fw
+  mkdir -p src/main/resources/db/migration
+  echo 'CREATE TABLE a(id int);' > src/main/resources/db/migration/V1__init.sql
+  echo 'SELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 5;' > src/main/resources/db/migration/V2__old.sql
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  git mv src/main/resources/db/migration/V2__old.sql src/main/resources/db/migration/V2__renamed.sql
+  git rm -q src/main/resources/db/migration/V1__init.sql
+  echo 'ALTER TABLE a ADD c int;' > src/main/resources/db/migration/V3__alter.sql
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "Flyway migration" "$REPORT_FILE"
+  grep -q "Deleted" "$REPORT_FILE"
+  grep -q "Added" "$REPORT_FILE"
+  grep -q "Renamed" "$REPORT_FILE"
+  grep -q "V2__renamed.sql" "$REPORT_FILE"
+}
+
+@test "db-report: EXTRA_DB_PATHS adds custom database locations" {
+  new_repo mod-extra
+  mkdir -p src/main/resources/custom
+  echo 'a,1' > src/main/resources/custom/seed.csv
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo 'a,2' > src/main/resources/custom/seed.csv
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H" ""
+  grep -q "No database changes detected" "$REPORT_FILE"
+
+  run_builder "$DB_REPO" "$B" "$H" "src/main/resources/custom/**"
+  grep -q "src/main/resources/custom/seed.csv" "$REPORT_FILE"
+  grep -q "^| Database | 1 |" "$REPORT_FILE"
+}
+
+@test "db-report: GITHUB_STEP_SUMMARY receives the full report with summary" {
+  new_repo mod-summary
+  mkdir -p src/main/resources/templates/db_scripts
+  echo '{"scripts":[]}' > src/main/resources/templates/db_scripts/schema.json
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  echo '{"scripts":[1]}' > src/main/resources/templates/db_scripts/schema.json
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  export GITHUB_STEP_SUMMARY="$TEST_TMP/step_summary.md"
+  : > "$GITHUB_STEP_SUMMARY"
+  BASE="$B" HEAD="$H" REPO_NAME="folio-org/mod-summary" EXTRA_PATHS="" REPORT_FILE="$TEST_TMP/r.md" \
+    run bash "$SCRIPT_DIR/report-builder.sh"
+  [[ "$status" -eq 0 ]]
+  diff "$TEST_TMP/r.md" "$GITHUB_STEP_SUMMARY"
+  grep -q "^| Database | 1 |" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "db-report: loose SQL (resources root, db/scripts, repo scripts/) is detected, test SQL is not" {
+  new_repo mod-sql
+  mkdir -p src/main/resources/db/scripts scripts/ops src/test/resources
+  echo 'a' > src/main/resources/template_create_tenant.sql
+  echo 'a' > src/main/resources/db/scripts/truncate.sql
+  echo 'a' > scripts/ops/delete_ids.sql
+  echo 'a' > src/test/resources/fixture.sql
+  git add -A && git commit -q -m base; local B; B=$(git rev-parse HEAD)
+  for f in src/main/resources/template_create_tenant.sql src/main/resources/db/scripts/truncate.sql scripts/ops/delete_ids.sql src/test/resources/fixture.sql; do echo b > $f; done
+  git add -A && git commit -q -m head; local H; H=$(git rev-parse HEAD)
+
+  run_builder "$DB_REPO" "$B" "$H"
+
+  grep -q "src/main/resources/template_create_tenant.sql" "$REPORT_FILE"
+  grep -q "src/main/resources/db/scripts/truncate.sql" "$REPORT_FILE"
+  grep -q "scripts/ops/delete_ids.sql" "$REPORT_FILE"
+  ! grep -q "fixture.sql" "$REPORT_FILE"
+  grep -q "^| Database | 3 |" "$REPORT_FILE"
+}

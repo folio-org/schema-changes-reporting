@@ -31,6 +31,15 @@ on:
         required: false
         type: string
         default: ''
+      db_paths:
+        description: >
+          Space-separated list of additional pathspec globs for database files
+          (e.g. 'src/main/resources/sql/**'). Defaults always included:
+          RMB templates/db_scripts, db/changelog, changelog, liquibase and
+          db/migration under src/main/resources (also in <module>-server/).
+        required: false
+        type: string
+        default: ''
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -85,6 +94,7 @@ jobs:
           HEAD: ${{ steps.refs.outputs.head }}
           REPO_NAME: ${{ inputs.repository || github.repository }}
           EXTRA_PATHS: ${{ inputs.schema_paths }}
+          EXTRA_DB_PATHS: ${{ inputs.db_paths }}
           REPORT_FILE: report.md
         run: bash .schema-changes-reporting/.github/scripts/report-builder.sh
 
